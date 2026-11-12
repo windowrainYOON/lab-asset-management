@@ -49,7 +49,7 @@ LANE_ROLE = Qt.UserRole + 9    # the row's section keeps a chevron lane (asset s
 # components/Sidebar (Desktop): familiar symbols in the app accent, icon-md (16), gap 6.
 # One symbol size for every row, so the tahoe app-icon tiles (20) are not used here.
 TAB_ICONS = {"dash:common": "square.grid.2x2", "dash:personal": "person", "schedule": "calendar",
-             "work": "checkmark.circle", "notices": "bell", "reservations": "clock", "orders": "shippingbox",
+             "work": "checkmark.circle", "requests": "square.and.pencil", "notices": "bell", "reservations": "clock", "orders": "shippingbox",
              "budget": "wonsign", "attendance": "alarm"}
 FILE_ICON = "list.bullet"  # a file is a list of items
 

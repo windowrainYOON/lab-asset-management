@@ -28,7 +28,9 @@
     chevl: '<path d="m15 5-7 7 7 7"/>',
     plus: '<path d="M12 5v14M5 12h14"/>',
     trash: '<path d="M4 7h16M9.5 7V5a1 1 0 0 1 1-1h3a1 1 0 0 1 1 1v2M6 7l.8 12a1.6 1.6 0 0 0 1.6 1.5h7.2a1.6 1.6 0 0 0 1.6-1.5L18 7"/><path d="M10 11v6M14 11v6"/>',
-    tick: '<path d="m5 12.5 4.5 4.5L19 7.5"/>'
+    tick: '<path d="m5 12.5 4.5 4.5L19 7.5"/>',
+    grid: '<rect x="4" y="4" width="7" height="7" rx="2"/><rect x="13" y="4" width="7" height="7" rx="2"/><rect x="4" y="13" width="7" height="7" rx="2"/><rect x="13" y="13" width="7" height="7" rx="2"/>',
+    send: '<path d="M12 19V6M6.5 11.5 12 6l5.5 5.5"/>'
   };
   function icon(name, cls) {
     var s = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
@@ -114,7 +116,7 @@
     return fetch(API, { method: 'POST', body: JSON.stringify(body), headers: { 'Content-Type': 'text/plain;charset=utf-8' } })
       .then(function (r) { return r.json(); }, function () { throw new Error('인터넷 연결을 확인해 주세요.'); })
       .then(function (res) {
-        if (res.ok) return res;
+        if (res.ok) { afterWrite(action); return res; }
         if (res.code === 'need_pin') { store('lab_key', null); boot(); }
         else if (res.code === 'need_member') { store('lab_member', null); boot(); }
         var e = new Error(res.error || '문제가 생겼어요.');
@@ -134,6 +136,101 @@
     });
   }
 
+  // ---------- saved data: read once, show at once, refresh on pull / after 5 min / after my edits ----------
+  var CACHE_KEY = 'lab_cache_v1';
+  var STALE_MS = 5 * 60 * 1000;
+  var READS = ['home', 'attendance.month', 'schedule.range', 'equipment.list', 'reservation.list', 'work.board',
+               'request.list', 'notice.list', 'notice.get', 'order.list', 'budget.lab', 'budget.mine'];
+  // a write → the saved answers it can change (dropped, so the screen asks the server again)
+  var TOUCHES = { reservation: ['reservation.', 'home', 'schedule.'], notice: ['notice.', 'home'], order: ['order.', 'home'],
+                  tap: ['home', 'attendance.'], request: ['request.', 'home'] };
+  var saved = readSaved();
+  var tracking = null;   // keys a screen's fetcher asked for
+  var bypass = false;    // true while a refresh is fetching (skip the saved answers)
+  function readSaved() {
+    try {
+      var c = JSON.parse(localStorage.getItem(CACHE_KEY) || 'null');
+      if (c && c.member === store('lab_member') && c.items) return c.items;
+    } catch (e) { /* private mode or broken: start empty */ }
+    return {};
+  }
+  var saveTimer = null;
+  function writeSaved() {
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(function () {
+      try { localStorage.setItem(CACHE_KEY, JSON.stringify({ member: store('lab_member'), items: saved })); } catch (e) { /* full: memory only */ }
+    }, 300);
+  }
+  function ckey(action, data) { return action + ' ' + JSON.stringify(data || {}); }
+  function putSaved(k, data) { saved[k] = { t: Date.now(), d: data }; writeSaved(); }
+  function dropSaved(prefixes) {
+    Object.keys(saved).forEach(function (k) { if (!prefixes || prefixes.some(function (p) { return k.indexOf(p) === 0; })) delete saved[k]; });
+    writeSaved();
+  }
+  function afterWrite(action) {
+    if (READS.indexOf(action) >= 0 || action === 'members' || action === 'batch' || action === 'enter') return;
+    if (action === 'pick' || action === 'cache.clear') return dropSaved(null);
+    var t = TOUCHES[action.split('.')[0]];
+    if (t) dropSaved(t);
+  }
+  /** A read through the saved answers. Same answer as api() but instant when it was read before. */
+  function cached(action, data) {
+    var k = ckey(action, data);
+    if (tracking) tracking.push(k);
+    var hit = saved[k];
+    if (hit && !bypass) return Promise.resolve(hit.d);
+    return api(action, data).then(function (r) {
+      var before = saved[k];
+      putSaved(k, r);
+      if (action === 'notice.get' && !(before && before.d.notice && before.d.notice.readers.indexOf(store('lab_member')) >= 0)) markNoticeRead(data.id);
+      return r;
+    });
+  }
+  /** Opening a notice marks it read on the server: mirror that in the saved lists instead of asking again. */
+  function markNoticeRead(id) {
+    Object.keys(saved).forEach(function (k) {
+      var d = saved[k].d;
+      if (k.indexOf('notice.list') === 0) (d.notices || []).forEach(function (n) { if (n.id === id) n.read = true; });
+      if (k.indexOf('home') === 0 && d.notices) {
+        var was = (d.notices.latest || []).concat([]).filter(function (n) { return n.id === id && !n.read; }).length;
+        (d.notices.latest || []).forEach(function (n) { if (n.id === id) n.read = true; });
+        if (was && d.notices.unread) d.notices.unread--;
+      }
+    });
+    writeSaved();
+  }
+  function oldest(keys) {
+    var t = Infinity;
+    keys.forEach(function (k) { if (saved[k] && saved[k].t < t) t = saved[k].t; });
+    return t === Infinity ? Date.now() : t;
+  }
+  function fetchedText(t) {
+    var d = new Date(t), now = new Date();
+    var h = d.getHours(), when = (h < 12 ? '오전 ' : '오후 ') + ((h + 11) % 12 + 1) + ':' + pad(d.getMinutes());
+    var day = ymdOf(d) === ymdOf(now) ? '' : ymdOf(d) === addDays(ymdOf(now), -1) ? '어제 ' : (d.getMonth() + 1) + '월 ' + d.getDate() + '일 ';
+    return day + when + '에 받음';
+  }
+  /** What the app reads when it opens. home (the first screen) comes first; the rest follow in one call.
+   * Keys match the screens' own reads, so a tab opened later shows at once. */
+  function openingCalls() {
+    var t = todayYmd(), mon = addDays(t, -((dateOf(t).getDay() + 6) % 7));
+    return [['home'], ['schedule.range', { from: mon, to: addDays(mon, 6) }],
+      ['reservation.list', { from: t, to: t }], ['reservation.list', { from: t, to: addDays(t, 30) }], ['work.board'],
+      ['request.list'], ['notice.list'], ['order.list'], ['budget.lab', { limit: 8 }]];
+  }
+  function readAll(calls) {
+    calls = calls || openingCalls();
+    return api('batch', { calls: calls.map(function (c) { return { action: c[0], data: c[1] || {} }; }) }).then(function (r) {
+      r.results.forEach(function (x, i) { if (x && x.ok) putSaved(ckey(calls[i][0], calls[i][1]), x); });
+    }, function (e) {
+      if (e.code !== 'bad_request') throw e;
+      // a server that has no batch yet: the same reads one by one, side by side
+      return Promise.all(calls.map(function (c) {
+        return api(c[0], c[1]).then(function (x) { putSaved(ckey(c[0], c[1]), x); }, function () {});
+      }));
+    });
+  }
+
   // ---------- dates ----------
   function pad(n) { return ('0' + n).slice(-2); }
   function ymdOf(d) { return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()); }
@@ -149,7 +246,7 @@
 
   // ---------- pieces ----------
   var app = document.getElementById('app');
-  var state = { route: '', cache: {} };
+  var state = { route: '', refresh: null, busy: false };
 
   function status(kind, text, plain) {
     return el('span.hig-status.hig-status--' + kind + (plain ? '.hig-status--plain' : ''), el('span.hig-status__dot'), text);
@@ -171,7 +268,7 @@
     var kids = [];
     if (o.icon) kids.push(el('span.tile', { style: 'background:' + (o.color || 'var(--accent)') }, icon(o.icon)));
     if (o.lead) kids.push(o.lead);
-    kids.push(el('span.hig-list__text', el('span.hig-list__title' + (o.accent ? '.acc' : ''), o.title),
+    kids.push(el('span.hig-list__text', el('span.hig-list__title' + (o.accent ? '.acc' : '') + (o.danger ? '.danger' : ''), o.title),
       o.sub ? el('span.hig-list__subtitle' + (o.wrap ? '.wrap-sub' : ''), o.sub) : null));
     if (o.detail !== undefined && o.detail !== '') kids.push(o.detail && o.detail.nodeType ? o.detail : el('span.hig-list__detail.num', o.detail));
     if (o.trail) kids.push(o.trail);
@@ -256,8 +353,8 @@
     return { close: close, error: err };
   }
 
-  var TABS = [['home', 'clock', '출퇴근'], ['schedule', 'cal', '일정'], ['res', 'scope', '예약'], ['work', 'check', '업무'], ['lab', 'flask', '연구실']];
-  var TAB_OF = { home: 'home', att: 'home', me: 'home', schedule: 'schedule', res: 'res', eq: 'res', work: 'work',
+  var TABS = [['home', 'grid', '요약'], ['schedule', 'cal', '일정'], ['res', 'scope', '예약'], ['work', 'check', '업무'], ['lab', 'flask', '연구실']];
+  var TAB_OF = { home: 'home', me: 'home', schedule: 'schedule', res: 'res', eq: 'res', work: 'work',
                  lab: 'lab', notices: 'lab', notice: 'lab', orders: 'lab', order: 'lab', budget: 'lab', ledger: 'lab' };
   function tabbar(sel) {
     return el('div.hig-tabbar.hig-glass.tabbar', { role: 'tablist' }, TABS.map(function (t) {
@@ -272,24 +369,50 @@
     var view = el('main.view' + (opts.tab === false ? '.notab' : ''), parts);
     app.appendChild(view);
     if (opts.tab !== false) app.appendChild(tabbar(TAB_OF[state.route.split('/')[0]] || 'home'));
-    window.scrollTo(0, opts.keepScroll ? window.scrollY : 0);
+    if (!opts.keepScroll) window.scrollTo(0, 0);
     return view;
   }
-  /** Load data then render; shows a spinner first, an error with retry on failure. */
+  /** Load data then render. Saved answers show at once; otherwise a spinner first, an error with retry on failure.
+   * state.refresh = 'pull' | 'quiet': ask the server again for this screen's reads only and redraw in place
+   * (nothing changes on screen until the new answer is in, and nothing is redrawn when it is the same). */
   function load(top, fetcher, render, opts) {
+    opts = opts || {};
     var route = state.route;
-    var holder = el('div', spinner());
-    screen([top, holder], opts);
-    return fetcher().then(function (data) {
+    var mode = state.refresh;
+    state.refresh = null;
+    var keys = [];
+    tracking = keys; bypass = !!mode;
+    var before = null;
+    var p;
+    try { p = fetcher(); } finally { tracking = null; bypass = false; }
+    if (mode) before = JSON.stringify(keys.map(function (k) { return saved[k] && saved[k].d; }));
+    var holder = null;
+    if (!mode) {
+      holder = el('div', spinner());
+      screen([top, holder], opts);
+    }
+    var done = p.then(function (data) {
       if (state.route !== route) return;
-      holder.textContent = '';
-      holder.appendChild(el('div', render(data)));
+      var cap = keys.length && top ? el('div.fetched', fetchedText(oldest(keys))) : null;
+      if (mode) {
+        var cur = document.querySelector('main.view .fetched');
+        if (cur && cap) cur.textContent = cap.textContent;
+        var same = JSON.stringify(keys.map(function (k) { return saved[k] && saved[k].d; })) === before;
+        if (same || uiBusy()) return;
+        holder = el('div');
+        screen([top, holder], Object.assign({}, opts, { keepScroll: true }));
+      } else holder.textContent = '';
+      holder.appendChild(el('div', cap, render(data)));
+      if (!mode && keys.length && Date.now() - oldest(keys) > STALE_MS) setTimeout(function () { refresh('quiet'); }, 0);
     }).catch(function (e) {
       if (state.route !== route || e.code === 'need_pin' || e.code === 'need_member') return;
+      if (mode) { if (mode === 'pull') toast(e.message || '새로 받지 못했어요'); return; }
       holder.textContent = '';
       holder.appendChild(el('div', el('p.empty-note', e.message),
         el('div.bottom-act', el('button.hig-button.hig-button--full', { onclick: function () { route_(); } }, '다시 시도'))));
     });
+    state.loading = done;
+    return done;
   }
   function largeTitle(text, trail) { return el('div.lt-row', el('h1.hig-large-title', text), trail || null); }
 
@@ -355,9 +478,40 @@
     }, { tab: false }).then(null, null);
   }
 
-  // ---------- 출퇴근 ----------
+  // ---------- 요약 ----------
+  function subHead(text, n) { return el('div.sub-h', text, n ? el('small', n + '건') : null); }
+  function rangeText(from, to) {
+    var a = dateOf(from), b = dateOf(to);
+    return (a.getMonth() + 1) + '월 ' + a.getDate() + '일–' + (a.getMonth() === b.getMonth() ? '' : (b.getMonth() + 1) + '월 ') + b.getDate() + '일';
+  }
+  function whenText(stamp) {
+    var d = String(stamp || '').slice(0, 10), t = hm(stamp);
+    if (d === todayYmd()) return t || '오늘';
+    if (d === addDays(todayYmd(), -1)) return '어제';
+    return d ? shortDay(d) : '';
+  }
+  /** One 업무 요청: who · 업무 · when, with 확인 for a receiver. */
+  function askRow(x) {
+    var who = x.fromMe && !x.toMe ? '→' : (x.from || '?').charAt(0);
+    var meta = x.fromMe && !x.toMe ? x.to.join(', ') + '에게 · ' + x.work + ' · ' + whenText(x.date) : x.from + ' · ' + x.work + ' · ' + whenText(x.date);
+    var trail;
+    if (x.toMe && !x.acked) {
+      trail = el('button.rq-ok', { onclick: function (e) {
+        e.stopPropagation();
+        var btn = e.currentTarget;
+        btn.disabled = true;
+        write('request.ack', { id: x.id }).then(function () {
+          btn.replaceWith(el('span.rq-st.done', '확인함'));
+          toast('확인했어요');
+          refresh('quiet');
+        }, function (err) { btn.disabled = false; failed(err); });
+      } }, '확인');
+    } else trail = el('span.rq-st' + (x.acked ? '.done' : ''), x.acked ? '확인함' : '확인 전');
+    return el('li.rq-row', x.toMe && !x.acked ? el('span.udot') : null, el('span.rq-av', who),
+      el('div.rq-tx', el('div.rq-memo', x.memo), el('div.rq-meta', meta)), trail);
+  }
   function homeScreen() {
-    load(largeTitle('출퇴근', iconButton('person', '내 정보', function () { go('me'); })), function () { return api('home'); }, function (r) {
+    load(largeTitle('요약', iconButton('person', '내 정보', function () { go('me'); })), function () { return cached('home'); }, function (r) {
       var a = r.attendance || {};
       var out = [];
       if (a.error) out.push(el('p.empty-note', a.error));
@@ -375,78 +529,51 @@
           el('div.stat', el('span.stat-n', String(st.late || 0), el('small', '회')), el('span.stat-l', '지각')),
           el('div.stat', el('span.stat-n', String(a.present), el('small', '/' + a.total)), el('span.stat-l', '오늘 연구실'))));
       }
-      var rows = [];
-      (r.reservations || []).forEach && (r.reservations || []).forEach(function (x) {
-        rows.push(row({ icon: 'scope', color: '#0a84ff', title: x.equipment + ' 예약', sub: shortDay(x.start.slice(0, 10)) + ' ' + hm(x.start) + '–' + hm(x.end) + (x.purpose ? ' · ' + x.purpose : ''),
-          onclick: function () { go('res/' + x.start.slice(0, 10)); } }));
-      });
-      ((r.work || {}).mine || []).forEach(function (t) {
-        rows.push(row({ icon: 'check', color: '#34c759', title: t.title || t.project, sub: (t.date === todayYmd() ? '오늘 내 차례' : shortDay(t.date)) + ' · ' + t.project, onclick: function () { go('work'); } }));
-      });
-      var o = r.orders || {};
-      if (o.handle) rows.push(row({ icon: 'cart', color: '#ff9500', title: '처리할 주문 요청', sub: o.handle + '건 · 내가 담당', onclick: function () { go('orders/handle'); } }));
+      var wk = r.week || {};
+      out.push(sectionHeader('나의 일', wk.from ? rangeText(wk.from, wk.to) : null));
+      function arr(v) { return Array.isArray(v) ? v : []; }
+      function err(v) { return v && v.error ? el('p.empty-note', v.error) : null; }
+
+      // this week's duties (overdue first)
+      var duties = arr(r.duties);
+      out.push(subHead('이번 주 당번', duties.length));
+      out.push(err(r.duties) || (duties.length ? list(duties.map(function (t) {
+        var when = t.overdue ? shortDay(t.date) + ' · 끝나지 않음' : t.date === todayYmd() ? '오늘 내 차례' : shortDay(t.date);
+        return row({ icon: 'check', color: t.overdue ? '#ff3b30' : '#34c759', title: t.project || t.title, danger: t.overdue,
+          sub: when + (t.title && t.title !== t.project ? ' · ' + t.title : ''), onclick: function () { go('work'); } });
+      })) : el('p.empty-note.sm', '이번 주 당번이 없어요.')));
+
+      // requests to me: 업무 요청 + order requests I handle
+      var asks = arr(r.asks), orders = arr(r.requests);
+      out.push(subHead('나에게 온 요청', asks.length + orders.length));
+      if (asks.length) out.push(el('ul.rq-list', asks.map(askRow)));
+      if (orders.length) out.push(list(orders.map(function (o) {
+        return row({ icon: 'cart', color: '#ff9500', title: o.item, sub: '주문 요청 · ' + o.requester + ' · ' + whenText(o.date),
+          trail: el('span.pill' + (o.state === '주문함' ? '.blue' : ''), o.state), onclick: function () { go('order/' + o.id); } });
+      })));
+      if (!asks.length && !orders.length) out.push(err(r.asks) || err(r.requests) || el('p.empty-note.sm', '나에게 온 요청이 없어요.'));
+
+      // my schedule this week
+      var sch = arr(r.schedule);
+      out.push(subHead('이번 주 내 일정', sch.length));
+      out.push(err(r.schedule) || (sch.length ? list(sch.map(function (i) {
+        var day = i.start.slice(0, 10);
+        var time = i.allDay ? (i.end && i.end !== day ? '–' + shortDay(i.end).replace(/ \(.\)$/, '') : '종일') : hm(i.start) + '–' + hm(i.end);
+        var extra = i.kind === 'reservation' ? i.purpose : i.calendar;
+        return row({ icon: i.kind === 'reservation' ? 'scope' : 'cal', color: i.kind === 'reservation' ? '#0a84ff' : '#5856d6', title: i.title,
+          sub: shortDay(day) + ' ' + time + (extra ? ' · ' + extra : ''),
+          onclick: function () { go(i.kind === 'reservation' ? 'res/' + day : 'schedule'); } });
+      })) : el('p.empty-note.sm', '이번 주 내 일정이 없어요.')));
+
+      // all notices
       var n = r.notices || {};
-      if (n.unread) {
-        var first = (n.latest || []).filter(function (x) { return !x.read; })[0];
-        rows.push(row({ icon: 'mega', color: '#ff375f', title: '새 공지', sub: first ? first.title : '', trail: el('span.hig-badge', String(n.unread)), onclick: function () { go(first ? 'notice/' + first.id : 'notices'); } }));
-      }
-      out.push(sectionHeader('나의 일'));
-      out.push(rows.length ? list(rows) : el('p.empty-note', '오늘은 예약·당번·처리할 일이 없어요.'));
-      out.push(list([row({ title: '출퇴근 기록 보기', onclick: function () { go('att'); } })]));
+      out.push(sectionHeader('공지사항', n.unread ? '안 읽음 ' + n.unread : null));
+      out.push(n.error ? el('p.empty-note', n.error) : list((n.latest || []).map(function (x) {
+        return row({ icon: 'mega', color: '#ff375f', title: x.title, sub: x.author + ' · ' + whenText(x.date),
+          trail: x.read ? null : el('span.udot.in'), onclick: function () { go('notice/' + x.id); } });
+      }).concat([row({ title: '공지 모두 보기', accent: true, onclick: function () { go('notices'); } })])));
       out.push(el('div', { style: 'height:12px' }));
       return out;
-    });
-  }
-
-  var attView = { who: 'all', ym: '' };
-  function attScreen() {
-    var ym = attView.ym || todayYmd().slice(0, 7);
-    function shift(n) { var p = ym.split('-'); var d = new Date(+p[0], +p[1] - 1 + n, 1); attView.ym = d.getFullYear() + '-' + pad(d.getMonth() + 1); attScreen(); }
-    var top = [navbar('출퇴근 기록', backButton('home')),
-      segmented([['me', '나'], ['all', '전체']], attView.who, function (v) { attView.who = v; attScreen(); }),
-      el('div.month-row', iconButton('chevl', '이전 달', function () { shift(-1); }), el('span.month', ym.replace('-', '년 ').replace(/^(\d+년 )0?/, '$1') + '월'), iconButton('chevr', '다음 달', function () { shift(1); }))];
-    load(top, function () { return api('attendance.month', { ym: ym }); }, function (m) {
-      var me = store('lab_member');
-      var late = function (v) { if (!/^\d\d:\d\d$/.test(v)) return false; var a = v.split(':'), s = m.settings.start.split(':'); return +a[0] * 60 + +a[1] > +s[0] * 60 + +s[1] + m.settings.grace; };
-      var shown = m.days.filter(function (d) { return d.date <= m.today || Object.keys(d.cells).length; });
-      if (attView.who === 'me') {
-        var st = m.stats[me] || { workdays: 0, present: 0, late: 0, avg: '' };
-        var rows = shown.slice().reverse().map(function (d) {
-          var v = d.cells[me] || '';
-          var detail = v ? (/^\d\d:\d\d$/.test(v) ? (late(v) ? status('warning', v, true) : el('span.hig-list__detail.num', v)) : el('span.hig-list__detail', v))
-            : el('span.hig-list__detail', d.work ? (d.date === m.today ? '아직' : '기록 없음') : d.reason);
-          return row({ title: shortDay(d.date), detail: detail });
-        });
-        return [el('div.stats',
-          el('div.stat', el('span.stat-n', String(st.present), el('small', '/' + st.workdays)), el('span.stat-l', '출근일')),
-          el('div.stat', el('span.stat-n', String(st.late), el('small', '회')), el('span.stat-l', '지각')),
-          el('div.stat', el('span.stat-n', st.avg || '–'), el('span.stat-l', '평균 출근'))),
-          sectionHeader('날짜별'), rows.length ? list(rows) : el('p.empty-note', '이 달 기록이 없어요.'),
-          footnote('기록 고치기는 출퇴근 기록 시트에서 직접 해요.')];
-      }
-      var head = el('tr', el('th', '날짜'), m.people.map(function (p) { return el('th.c', p); }));
-      var body = [], skipped = [];
-      function flush() {
-        if (!skipped.length) return;
-        body.push(el('tr.sep', el('td.skip', { colspan: m.people.length + 1 }, skipped[0].slice(5).replace('-', '/') + (skipped.length > 1 ? '–' + skipped[skipped.length - 1].slice(8) : '') + ' 쉬는 날 · 접힘')));
-        skipped = [];
-      }
-      shown.forEach(function (d) {
-        if (!d.work && !Object.keys(d.cells).length) { skipped.push(d.date); return; }
-        flush();
-        body.push(el('tr' + (d.date === m.today ? '.today' : ''), el('th', { scope: 'row' }, d.date.slice(8) + ' ', el('span.dow', d.dow)),
-          m.people.map(function (p) {
-            var v = d.cells[p] || '';
-            if (!v) return el('td.c.empty', d.work ? '' : '·');
-            if (!/^\d\d:\d\d$/.test(v)) return el('td.c.txt', v);
-            return el('td.c' + (late(v) ? '.late' : ''), v);
-          })));
-      });
-      flush();
-      var s = m.settings;
-      return [el('div.hig-table-wrap.tw', el('table.hig-table.hig-table--sticky-first.att', el('thead', head), el('tbody', body.reverse()))),
-        el('div.legend', status('warning', '지각 (' + s.start + ' + ' + s.grace + '분 이후)', true), status('neutral', '휴가·출장 같은 글자', true)),
-        footnote('시트 그대로의 모양이에요. 공휴일과 "출퇴근 기록에서 제외" 일정이 있는 날은 접혀요.')];
     });
   }
 
@@ -464,7 +591,7 @@
       } })]),
       footnote('잘못 골랐거나 휴대폰을 같이 쓰게 됐을 때 써요. 새 휴대폰은 태그를 찍고 비밀번호와 이름을 한 번 넣으면 돼요.'),
       sectionHeader('문제가 있을 때'),
-      list([row({ title: '최신 내용 다시 받기', onclick: function () { api('cache.clear').then(function () { toast('새로 받았어요'); }, failed); } })]),
+      list([row({ title: '최신 내용 다시 받기', onclick: function () { api('cache.clear').then(function () { dropSaved(null); return readAll(); }).then(function () { toast('새로 받았어요'); }, failed); } })]),
       footnote('아이폰 Safari는 이 사이트를 7일 넘게 열지 않으면 저장된 이름을 지울 수 있어요. 그러면 이름을 다시 한 번 고르면 돼요.')]);
   }
 
@@ -479,7 +606,7 @@
       el('div.month-row', iconButton('chevl', '지난주', function () { chooseDay(addDays(day, -7)); }),
         el('span.month', (dateOf(start).getMonth() + 1) + '월 ' + dateOf(start).getDate() + '일 주'),
         iconButton('chevr', '다음 주', function () { chooseDay(addDays(day, 7)); }))];
-    load(top, function () { return api('schedule.range', { from: start, to: addDays(start, 6) }); }, function (r) {
+    load(top, function () { return cached('schedule.range', { from: start, to: addDays(start, 6) }); }, function (r) {
       var items = r.items.filter(function (i) { return !schedView.mine || i.mine; });
       var byDay = {};
       items.forEach(function (i) {
@@ -525,12 +652,12 @@
   var resView = { mine: false };
   function resScreen(day) {
     day = /^\d{4}-\d{2}-\d{2}$/.test(day || '') ? day : todayYmd();
-    var top = [navbar('장비 예약', iconButton('refresh', '새로 고침', function () { resScreen(day); }), iconButton('plus', '새 예약', function () { resSheet(null, day, null, state.res); })),
+    var top = [navbar('장비 예약', iconButton('refresh', '새로 고침', function () { refresh('pull'); }), iconButton('plus', '새 예약', function () { resSheet(null, day, null, state.res); })),
       el('div.month-row', iconButton('chevl', '전날', function () { go('res/' + addDays(day, -1)); }),
         el('span.month', shortDay(day) + (day === todayYmd() ? ' 오늘' : '')),
         iconButton('chevr', '다음날', function () { go('res/' + addDays(day, 1)); })),
       chips([['all', '모든 장비'], ['mine', '내 예약']], resView.mine ? 'mine' : 'all', function (v) { resView.mine = v === 'mine'; resScreen(day); })];
-    load(top, function () { return api('reservation.list', resView.mine ? { from: todayYmd(), to: addDays(todayYmd(), 30) } : { from: day, to: day }); }, function (r) {
+    load(top, function () { return cached('reservation.list', resView.mine ? { from: todayYmd(), to: addDays(todayYmd(), 30) } : { from: day, to: day }); }, function (r) {
       state.res = r;
       if (resView.mine) {
         var mine = r.reservations.filter(function (x) { return x.mine && x.end > r.now; });
@@ -580,7 +707,7 @@
   function eqScreen(id, day) {
     day = /^\d{4}-\d{2}-\d{2}$/.test(day || '') ? day : todayYmd();
     load(navbar('시간표', backButton('res/' + day), iconButton('plus', '새 예약', function () { resSheet(null, day, { eq: id }, state.res); })),
-      function () { return api('reservation.list', { from: day, to: day }); }, function (r) {
+      function () { return cached('reservation.list', { from: day, to: day }); }, function (r) {
         state.res = r;
         var eq = r.equipment.filter(function (e) { return e.id === id; })[0];
         if (!eq) return el('p.empty-note', '장비를 찾지 못했어요.');
@@ -611,7 +738,7 @@
   /** New or edit booking sheet. data = the loaded reservation.list answer (equipment + that day's bookings). */
   function resSheet(res, day, preset, data) {
     var equipment = (data && data.equipment) || [];
-    if (!equipment.length) { api('equipment.list').then(function (r) { resSheet(res, day, preset, { equipment: r.equipment, reservations: [] }); }, failed); return; }
+    if (!equipment.length) { cached('equipment.list').then(function (r) { resSheet(res, day, preset, { equipment: r.equipment, reservations: [] }); }, failed); return; }
     preset = preset || {};
     var eqSel = select(equipment.filter(function (e) { return res || e.state !== '점검 중'; }).map(function (e) { return [e.id, e.name]; }), res ? res.equipmentId : preset.eq || '');
     var date = el('input.hig-input', { type: 'date', value: res ? res.start.slice(0, 10) : day });
@@ -698,9 +825,74 @@
   }
 
   // ---------- 업무 ----------
+  state.reqDraft = { workId: '', memo: '' };
+  /** Bottom sheet listing the 업무 to send a request to (담당 first, then this turn of 당번·마일스톤). */
+  function workPicker(works, current, onpick) {
+    var scrim = el('div.hig-scrim', { onclick: close });
+    function close() { scrim.remove(); box.remove(); }
+    function item(w) {
+      return el('li.hig-list__row', { 'data-interactive': true, style: 'min-height:var(--hig-row-rich)', onclick: function () { close(); onpick(w); } },
+        el('span.rq-dot.big', { style: 'background:' + (w.kind === 'owner' ? '#5e5ce6' : '#34c759') }),
+        el('span.hig-list__text', el('span.hig-list__title', w.name),
+          el('span.hig-list__subtitle', (w.kind === 'owner' ? '담당' : '이번 차례') + ' · ' + (w.people.join(', ') || '담당자 없음'))),
+        w.id === current ? el('span.tick', icon('tick')) : null);
+    }
+    var owners = works.filter(function (w) { return w.kind === 'owner'; }), turns = works.filter(function (w) { return w.kind !== 'owner'; });
+    var box = el('div.hig-sheet.app-sheet', { role: 'dialog', 'aria-label': '어느 업무에 요청할까요?' }, el('div.hig-sheet__grabber'),
+      el('div.sheet-bar', el('span'), el('span.sheet-t', '어느 업무에 요청할까요?'), textButton('닫기', close)),
+      el('div.pk-scroll',
+        owners.length ? [el('div.pk-h', '담당'), list(owners.map(item))] : null,
+        turns.length ? [el('div.pk-h', '당번 · 마일스톤'), list(turns.map(item))] : null,
+        works.length ? null : el('p.empty-note', '업무가 없어요. 데스크톱 앱에서 업무를 만들어 주세요.')));
+    document.body.appendChild(scrim);
+    document.body.appendChild(box);
+  }
+  function requestCard(works) {
+    var d = state.reqDraft;
+    var w = works.filter(function (x) { return x.id === d.workId; })[0] || null;
+    var ta = el('textarea.rq-ta', { placeholder: '무엇을 부탁할까요?', rows: 3, 'aria-label': '요청 내용' });
+    ta.value = d.memo || '';
+    var send = el('button.rq-send', { disabled: true }, icon('send'), '보내기');
+    function check() { send.disabled = !(w && ta.value.trim()); }
+    ta.addEventListener('input', function () { d.memo = ta.value; check(); });
+    var to;
+    function toBtn() {
+      var b = el('button.rq-to', { type: 'button' },
+        w ? [el('span.rq-dot', { style: 'background:' + (w.kind === 'owner' ? '#5e5ce6' : '#34c759') }), el('span.rq-w', w.name),
+             el('span.rq-p', '받는 사람 · ' + (w.people.join(', ') || '없음'))] : el('span.rq-w.ph', '업무 고르기'),
+        el('span.rq-cv', '⌄'));
+      b.addEventListener('click', function () {
+        workPicker(works, d.workId, function (pick) { d.workId = pick.id; w = pick; var nb = toBtn(); b.replaceWith(nb); check(); });
+      });
+      return b;
+    }
+    to = toBtn();
+    send.addEventListener('click', function () {
+      send.disabled = true;
+      write('request.create', { workId: w.id, memo: ta.value.trim() }).then(function (r) {
+        state.reqDraft = { workId: '', memo: '' };
+        toast(r.to.join(', ') + '님에게 보냈어요');
+        refresh('quiet');
+      }, function (e) { check(); failed(e); });
+    });
+    check();
+    var card = el('div.rq-card', el('div.rq-h', '업무 요청하기'), to, ta,
+      el('div.rq-foot', el('span.rq-hint', '받는 사람에게 메일도 가요'), send));
+    return card;
+  }
   function workScreen() {
-    load(largeTitle('업무'), function () { return api('work.board'); }, function (w) {
+    load(largeTitle('업무'), function () { return Promise.all([cached('work.board'), cached('request.list')]); }, function (res) {
+      var w = res[0], q = res[1];
       var me = store('lab_member');
+      var out = [requestCard(q.works || [])];
+      var toMe = (q.toMe || []).slice(0, 10), fromMe = (q.fromMe || []).slice(0, 5);
+      var open = toMe.filter(function (x) { return !x.acked; }).length;
+      out.push(sectionHeader('나에게 온 요청', open ? String(open) : null));
+      out.push(toMe.length ? el('ul.rq-list', toMe.map(askRow)) : el('p.empty-note.sm', '아직 받은 요청이 없어요.'));
+      if (fromMe.length) {
+        out.push(sectionHeader('내가 보낸 요청'));
+        out.push(el('ul.rq-list', fromMe.map(askRow)));
+      }
       var cards = w.projects.map(function (p) {
         if (p.kind === 'milestone') {
           return el('div.hig-card.pj', el('div.pj-top', el('span.pj-n', p.name), el('span.pj-k', '마일스톤 · 남은 ' + p.remaining)),
@@ -715,16 +907,24 @@
         return el('div.hig-card.pj', el('div.pj-top', el('span.pj-n', p.name), el('span.pj-k', [p.freq, p.duty !== p.name ? p.duty : ''].filter(Boolean).join(' · '))),
           el('div.pj-grid', cell('이번', p.current, p.mineNow), cell('다음', p.next, mineNext)));
       });
-      return [sectionHeader('프로젝트'), cards.length ? el('div.pjs', cards) : el('p.empty-note', '업무가 없어요.'),
-        sectionHeader('내 다음 업무'),
-        w.mine.length ? list(w.mine.map(function (t) { return row({ title: t.title || t.project, sub: t.project, detail: t.date === w.today ? '오늘' : shortDay(t.date) }); })) : el('p.empty-note', '다가오는 내 업무가 없어요.'),
-        w.overdue.length ? footnote('지난 날짜인데 완료 표시가 안 된 내 업무가 ' + w.overdue.length + '개 있어요. 완료는 데스크톱 앱에서 표시해요.') : footnote('완료 표시는 데스크톱 앱 업무 탭에서 해요.')];
+      out.push(sectionHeader('당번'), cards.length ? el('div.pjs', cards) : el('p.empty-note.sm', '당번 업무가 없어요.'));
+      var owners = w.owners || [];
+      if (owners.length) {
+        out.push(sectionHeader('담당', '일정표에 안 나와요'));
+        out.push(list(owners.map(function (o) {
+          return row({ title: o.name, sub: (o.people.join(', ') || '담당자 없음') + (o.mine ? ' (나)' : ''), wrap: true,
+            trail: o.mine ? el('span.mine-tag', '내 담당') : null });
+        })));
+      }
+      out.push(footnote(w.overdue.length ? '지난 날짜인데 완료 표시가 안 된 내 업무가 ' + w.overdue.length + '개 있어요. 완료 표시와 담당 정하기는 데스크톱 앱에서 해요.'
+        : '완료 표시와 담당 정하기는 데스크톱 앱 업무 탭에서 해요.'));
+      return out;
     });
   }
 
   // ---------- 연구실 ----------
   function labScreen() {
-    load(largeTitle('연구실'), function () { return api('home'); }, function (r) {
+    load(largeTitle('연구실'), function () { return cached('home'); }, function (r) {
       var n = r.notices || {}, o = r.orders || {};
       return [list([
         row({ icon: 'mega', color: '#ff375f', title: '공지사항', trail: n.unread ? el('span.hig-badge', String(n.unread)) : null, onclick: function () { go('notices'); } }),
@@ -739,13 +939,13 @@
       lead: x.pinned ? status('warning', '중요', true) : null, trail: x.read ? null : el('span.hig-badge', '새'), onclick: function () { go('notice/' + x.id); } });
   }
   function noticesScreen() {
-    load(navbar('공지사항', backButton('lab'), iconButton('plus', '새 공지', function () { noticeSheet(null); })), function () { return api('notice.list'); }, function (r) {
+    load(navbar('공지사항', backButton('lab'), iconButton('plus', '새 공지', function () { noticeSheet(null); })), function () { return cached('notice.list'); }, function (r) {
       return r.notices.length ? list(r.notices.map(noticeRow)) : el('p.empty-note', '공지가 없어요. + 로 첫 공지를 써 보세요.');
     });
   }
   function noticeScreen(id) {
     var top = navbar('공지', backButton('notices'));
-    load(top, function () { return api('notice.get', { id: id }); }, function (r) {
+    load(top, function () { return cached('notice.get', { id: id }); }, function (r) {
       var n = r.notice;
       top.querySelector('.hig-navbar__trailing').appendChild(textButton('수정', function () { noticeSheet(n); }));
       return [el('div.notice', n.pinned ? status('warning', '중요') : null, el('h2.nt', n.title), el('div.nm', n.author + ' · ' + n.date), el('p.nbody', n.body)),
@@ -784,7 +984,7 @@
     if (filter) orderView.filter = filter;
     var top = [navbar('주문 요청', backButton('lab'), iconButton('plus', '새 주문 요청', function () { orderSheet(null, state.orderMeta); })),
       chips([['all', '전체'], ['handle', '내가 처리'], ['mine', '내 요청']], orderView.filter, function (v) { orderView.filter = v; ordersScreen(); })];
-    load(top, function () { return api('order.list'); }, function (r) {
+    load(top, function () { return cached('order.list'); }, function (r) {
       state.orderMeta = r;
       var list0 = r.orders.filter(function (o) { return orderView.filter === 'all' || (orderView.filter === 'handle' ? o.mineHandle : o.mineRequest); });
       var wait = list0.filter(function (o) { return o.state === '요청'; }), doing = list0.filter(function (o) { return o.state === '주문함'; }),
@@ -804,7 +1004,7 @@
   }
   function orderScreen(id) {
     var top = navbar('주문 요청', backButton('orders'));
-    load(top, function () { return api('order.list'); }, function (r) {
+    load(top, function () { return cached('order.list'); }, function (r) {
       state.orderMeta = r;
       var o = r.orders.filter(function (x) { return x.id === id; })[0];
       if (!o) return el('p.empty-note', '지워진 요청이에요.');
@@ -855,7 +1055,7 @@
   }
 
   function budgetScreen(all) {
-    load(navbar(all ? '장부' : '예산', backButton(all ? 'budget' : 'lab')), function () { return api('budget.lab', { limit: all ? 2000 : 8 }); }, function (b) {
+    load(navbar(all ? '장부' : '예산', backButton(all ? 'budget' : 'lab')), function () { return cached('budget.lab', { limit: all ? 2000 : 8 }); }, function (b) {
       var out = [];
       var me = b.mine;
       function entry(e) {
@@ -895,11 +1095,29 @@
   }
   function route_() {
     closeOverlays();
+    state.refresh = null;
+    show();
+    window.scrollTo(0, 0);
+  }
+  /** Ask the server again for what the current screen shows. mode 'pull' (user pulled) or 'quiet' (5-minute refresh). */
+  function refresh(mode) {
+    if (state.busy || !store('lab_key') || !store('lab_member') || state.route === 'tap' || state.route === 'me') return Promise.resolve();
+    state.busy = true;
+    if (mode === 'quiet') banner(true);
+    state.loading = null;
+    state.refresh = mode;
+    show();
+    state.refresh = null;
+    return Promise.resolve(state.loading).then(function () {
+      state.busy = false; banner(false);
+      if (mode === 'pull') toast('새로 받았어요');
+    }, function () { state.busy = false; banner(false); });
+  }
+  function show() {
     var path = (location.hash || '#/home').replace(/^#\/?/, '') || 'home';
     state.route = path;
     var p = path.split('/');
     switch (p[0]) {
-      case 'att': return attScreen();
       case 'me': return meScreen();
       case 'schedule': return scheduleScreen();
       case 'res': return resScreen(p[1]);
@@ -926,14 +1144,145 @@
   function boot() {
     if (!store('lab_key')) return pinScreen();
     if (!store('lab_member')) return pickScreen(false);
+    if (savedFor !== store('lab_member')) { saved = readSaved(); savedFor = store('lab_member'); }
     var tag = sessionStorage.getItem('pending_tap');
     if (tag) {
       sessionStorage.removeItem('pending_tap');
       state.route = 'tap';
       return tapScreen(JSON.parse(tag));
     }
-    route_();
+    opening();
   }
+  var savedFor = store('lab_member');
+  /** A sheet or alert is open, or the person is typing: a background refresh must not redraw now. */
+  function uiBusy() {
+    var a = document.activeElement;
+    return !!(document.querySelector('body > .hig-sheet, body > .hig-alert') || (a && /^(TEXTAREA|INPUT|SELECT)$/.test(a.tagName)));
+  }
+  /** App opened. First time: the loading screen while 요약 (home) is read, then 요약 shows and the other
+   * screens' data follows in the background (a tab opened before that asks for its own data at once).
+   * Later: the saved screens at once, and everything read again in the background. */
+  function opening() {
+    if (!Object.keys(saved).length) {
+      var calls = openingCalls();
+      var ld = loadingScreen();
+      return cached('home').then(function () {
+        ld.finish(route_);
+        state.busy = true;
+        readAll(calls.slice(1)).then(function () { state.busy = false; }, function () { state.busy = false; });
+      }, function (e) {
+        ld.close();
+        if (e.code !== 'need_pin' && e.code !== 'need_member') route_();
+      });
+    }
+    route_();
+    state.busy = true;
+    banner(true);
+    readAll().then(function () {
+      state.busy = false;
+      state.refresh = 'quiet';
+      if (!uiBusy()) show();
+      state.refresh = null;
+      banner(false);
+    }, function () { state.busy = false; banner(false); });
+  }
+  // a different line each time the loading screen shows (never the same one twice in a row)
+  var QUOTES = ['오늘 실험은 한 번에 될 거예요. 아마도요.', '실패한 실험도 데이터예요. 그렇다고 믿어요.',
+    '피펫 팁은 넉넉하게, 마음은 여유롭게', '오늘의 n수가 내일의 figure가 됩니다', '논문은 언젠가 나와요. 진짜로요.',
+    '커피 한 잔 하고 시작해도 괜찮아요', '대조군도 소중한 하루 보내세요', '오늘도 p < 0.05 같은 하루 되세요',
+    '라벨은 꼼꼼히, 기억은 믿지 말기', '장비도 쉬어야 해요. 당신도요.', '세포는 기다려 주지 않지만 점심은 챙기세요',
+    '재현되는 하루가 되길 바라요'];
+  function pickQuote() {
+    var last = -1;
+    try { last = +(localStorage.getItem('lab_quote') || -1); } catch (e) { /* private mode */ }
+    var i = Math.floor(Math.random() * (QUOTES.length - 1));
+    if (i >= last && last >= 0) i++;
+    try { localStorage.setItem('lab_quote', String(i)); } catch (e) { /* private mode */ }
+    return QUOTES[i];
+  }
+  var LOADING_MIN_MS = 1800;   // the intro (blue wash, mark, line) plays at least this long
+  /** The first-open loading screen: blue wash, the mark drawn in lines, a witty line typed out, ripples while waiting. */
+  function loadingScreen() {
+    app.textContent = '';
+    var still = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    var svg = '<svg viewBox="0 0 96 96" aria-hidden="true"><circle class="ld-pulse" cx="48" cy="48" r="30"/><circle class="ld-pulse p2" cx="48" cy="48" r="30"/>' +
+      '<circle class="ld-ring r2" cx="48" cy="48" r="44"/><circle class="ld-ring r1" cx="48" cy="48" r="30"/><path class="ld-chk" d="M35 49 l9 9 l18 -19"/></svg>';
+    var mark = el('div.ld-mark');
+    mark.innerHTML = svg;
+    var line = el('div.ld-s', { 'aria-live': 'polite' });
+    var stt = el('span', '요약 받는 중');
+    var box = el('div.ld' + (still ? '.still' : ''), { role: 'status', 'aria-label': '처음 화면을 준비하고 있어요' },
+      el('div.ld-wash'), mark, line, el('div.ld-st', stt, el('small', '처음 한 번만 잠깐 걸려요')), el('div.ld-bar', el('i')));
+    document.body.appendChild(box);
+    var t0 = Date.now(), text = pickQuote(), timer = null;
+    function typeLine() {
+      if (still) { line.textContent = text; box.classList.add('loop'); return; }
+      var i = 0;
+      timer = setInterval(function () {
+        line.textContent = text.slice(0, ++i);
+        if (i >= text.length) { clearInterval(timer); box.classList.add('loop'); }
+      }, 38);
+    }
+    var start = setTimeout(typeLine, still ? 0 : 1250);
+    function close() { clearTimeout(start); clearInterval(timer); box.remove(); }
+    return {
+      close: close,
+      /** Data is in: let the intro finish, draw the screen behind, then fade the loading screen out. */
+      finish: function (draw) {
+        setTimeout(function () {
+          clearInterval(timer); line.textContent = text; box.classList.add('loop');
+          stt.textContent = '준비됐어요';
+          draw();
+          setTimeout(function () {
+            box.classList.add('out');
+            setTimeout(close, 600);
+          }, 250);
+        }, Math.max(0, LOADING_MIN_MS - (Date.now() - t0)));
+      }
+    };
+  }
+  var bannerEl = null;
+  function banner(on) {
+    if (on && !bannerEl) { bannerEl = el('div.fresh-pill', { role: 'status' }, el('span.mini-spin'), '최신 내용 받는 중'); document.body.appendChild(bannerEl); }
+    if (!on && bannerEl) { bannerEl.remove(); bannerEl = null; }
+  }
+  // pull down at the top of a screen → refresh that screen's data
+  (function () {
+    var y0 = null, dy = 0, pill = null, LIMIT = 70;
+    function setPill(text, spin) {
+      if (!pill) { pill = el('div.pull-pill'); document.body.appendChild(pill); }
+      pill.textContent = '';
+      pill.appendChild(spin ? el('span.mini-spin') : el('span.pull-arrow', '↓'));
+      pill.appendChild(document.createTextNode(text));
+      pill.style.transform = 'translate(-50%, ' + Math.min(dy * 0.5, LIMIT) + 'px)';
+    }
+    function clear() { if (pill) { pill.remove(); pill = null; } y0 = null; dy = 0; }
+    window.addEventListener('touchstart', function (e) {
+      y0 = (window.scrollY <= 0 && !state.busy && e.touches.length === 1 && !document.querySelector('body > .hig-sheet, body > .hig-alert')
+        && store('lab_key') && store('lab_member') && state.route !== 'tap') ? e.touches[0].clientY : null;
+      dy = 0;
+    }, { passive: true });
+    window.addEventListener('touchmove', function (e) {
+      if (y0 === null) return;
+      dy = e.touches[0].clientY - y0;
+      if (dy <= 8 || window.scrollY > 0) { if (pill) { pill.remove(); pill = null; } return; }
+      setPill(dy * 0.5 >= LIMIT ? '놓으면 새로고침' : '당겨서 새로고침', false);
+    }, { passive: true });
+    window.addEventListener('touchend', function () {
+      if (y0 === null) return;
+      if (dy * 0.5 >= LIMIT) {
+        dy = LIMIT * 2; setPill('새로 받는 중', true);
+        refresh('pull').then(clear, clear);
+      } else clear();
+    }, { passive: true });
+  })();
+  // back to the app after a while → refresh what is on screen if it is older than 5 minutes
+  document.addEventListener('visibilitychange', function () {
+    if (document.visibilityState !== 'visible' || !store('lab_key') || !store('lab_member')) return;
+    var keys = Object.keys(saved);
+    if (keys.length && Date.now() - oldest(keys) > STALE_MS) refresh('quiet');
+  });
+  if ('scrollRestoration' in history) history.scrollRestoration = 'manual';
 
   // tag URL: ?picc=…&cmac=… → remember for this tab, clean the address bar
   (function () {

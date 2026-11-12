@@ -342,7 +342,86 @@ test('home answers in one call', () => {
   const r = h.as('가나다', { action: 'home' });
   assert.ok(r.ok);
   assert.deepStrictEqual([r.attendance.mine, r.attendance.present, r.attendance.total, r.notices.unread], ['08:55', 1, 2, 2]);
-  ['attendance', 'reservations', 'work', 'notices', 'orders'].forEach(k => assert.ok(!r[k].error, k + ': ' + JSON.stringify(r[k])));
+  ['attendance', 'duties', 'requests', 'schedule', 'notices', 'orders'].forEach(k => assert.ok(!r[k].error, k + ': ' + JSON.stringify(r[k])));
+});
+test('home 요약: this week\'s duties (overdue first), requests to me, my schedule', () => {
+  const h = fresh();
+  h.books.WRK.getSheetByName('업무').data.push(
+    ['t0000004', 'p0000001', '청소 당번', '2026-11-03', '가나다', '정리', '', ''],     // last week, not done → overdue
+    ['t0000005', 'p0000001', '청소 당번', '2026-11-17', '가나다', '청소', '', ''],     // next week → not shown
+    ['t0000006', 'p0000001', '청소 당번', '2026-11-10', '가나다', '청소', 'O', '']);   // done → not shown
+  const o = h.as('사아자', { action: 'order.create', item: 'Anti-GFP', category: '항체' });   // 항체 → 라마바 in charge
+  assert.ok(o.ok, JSON.stringify(o));
+  const r = h.as('가나다', { action: 'home' });
+  assert.deepStrictEqual(r.week, { from: '2026-11-09', to: '2026-11-15' });
+  assert.deepStrictEqual(r.duties.map(t => t.id + ':' + t.overdue), ['t0000004:true', 't0000002:false']);
+  assert.deepStrictEqual(r.requests, []);
+  assert.deepStrictEqual(r.schedule.map(i => i.kind + ':' + i.title), ['event:가나다 미팅']);
+  const m = h.as('라마바', { action: 'home' });
+  assert.deepStrictEqual(m.requests.map(x => x.item + ':' + x.requester + ':' + x.state), ['Anti-GFP:사아자:요청']);
+  assert.deepStrictEqual(m.schedule.map(i => i.kind + ':' + i.title), ['reservation:공초점 현미경']);
+  assert.deepStrictEqual(m.duties, []);
+});
+test('work: 담당 (owner) duties are listed apart and never on the schedule', () => {
+  const h = fresh();
+  h.books.WRK.getSheetByName('프로젝트').data.push(['p0000002', '액체질소 관리', '담당', '라마바', '', '', '', '', '금요일 충전', '']);
+  const w = h.as('가나다', { action: 'work.board' });
+  assert.deepStrictEqual(w.projects.map(p => p.id), ['p0000001']);
+  assert.deepStrictEqual(w.owners, [{ id: 'p0000002', name: '액체질소 관리', people: ['라마바'], memo: '금요일 충전', mine: false }]);
+  assert.ok(h.as('라마바', { action: 'work.board' }).owners[0].mine);
+});
+test('업무 요청: memo to the 업무 people, mailed at once, 확인, shows in 요약', () => {
+  const h = fresh();
+  h.books.WRK.getSheetByName('프로젝트').data.push(['p0000002', '액체질소 관리', '담당', '라마바', '', '', '', '', '', '']);
+  const l = h.as('가나다', { action: 'request.list' });
+  assert.deepStrictEqual(l.works.map(w => w.name + ':' + w.people.join('/') + ':' + w.mine), ['청소 당번:가나다:true', '액체질소 관리:라마바:false']);
+  assert.strictEqual(h.as('가나다', { action: 'request.create', workId: 'p0000002', memo: '  ' }).code, 'rule');
+  const c = h.as('가나다', { action: 'request.create', workId: 'p0000002', memo: '내일 문 열어 주세요' });
+  assert.ok(c.ok && c.mailed, JSON.stringify(c));
+  assert.deepStrictEqual(c.to, ['라마바']);
+  assert.strictEqual(h.mails[0].to, 'b@example.com');
+  assert.ok(h.mails[0].body.includes('내일 문 열어 주세요'));
+  const row = h.books.WRK.getSheetByName('요청').data;
+  assert.deepStrictEqual(row[0].slice(0, 8), ['ID', '날짜', '업무 ID', '업무', '보낸 사람', '받는 사람', '내용', '상태']);
+  const home = h.as('라마바', { action: 'home' });
+  assert.deepStrictEqual(home.asks.map(x => x.memo + ':' + x.from), ['내일 문 열어 주세요:가나다']);
+  const r = h.as('라마바', { action: 'request.list' });
+  assert.ok(r.toMe[0].toMe && !r.toMe[0].acked);
+  assert.ok(h.as('라마바', { action: 'request.ack', id: c.id }).ok);
+  assert.deepStrictEqual(h.as('라마바', { action: 'home' }).asks, []);
+  const mine = h.as('가나다', { action: 'request.list' }).fromMe[0];
+  assert.deepStrictEqual([mine.acked, mine.ackBy, mine.fromMe], [true, '라마바', true]);
+  // a request on a rotation goes to this turn's people
+  const c2 = h.as('라마바', { action: 'request.create', workId: 'p0000001', memo: '청소 도구 채워 주세요' });
+  assert.deepStrictEqual(c2.to, ['가나다']);
+});
+test('업무 요청 rows the desktop app adds are mailed by the 5-minute trigger, once', () => {
+  const h = fresh();
+  h.as('가나다', { action: 'request.create', workId: 'p0000001', memo: '웹에서' });
+  const sh = h.books.WRK.getSheetByName('요청');
+  sh.data.push(['q0000009', '2026-11-11 08:50', 'p0000001', '청소 당번', '라마바', '가나다', '데스크톱에서', '보냄', '', '', ''],
+               ['q0000008', '2026-11-01 08:50', 'p0000001', '청소 당번', '라마바', '가나다', '오래된 것', '보냄', '', '', '']);
+  const before = h.mails.length;
+  assert.strictEqual(h.run('sendPendingRequestMails()'), 1);
+  assert.strictEqual(h.mails.length, before + 1);
+  assert.ok(h.mails[before].body.includes('데스크톱에서'));
+  assert.ok(sh.data[2][10], 'stamped');
+  assert.strictEqual(h.run('sendPendingRequestMails()'), 0);
+});
+test('batch answers several reads in one call, refuses writes', () => {
+  const h = fresh();
+  const r = h.as('가나다', { action: 'batch', calls: [
+    { action: 'home' }, { action: 'work.board' }, { action: 'notice.list' },
+    { action: 'reservation.list', data: { from: '2026-11-11', to: '2026-11-11' } },
+    { action: 'reservation.create', data: { equipmentId: 'x' } }, { action: 'notice.get', data: { id: 'n1' } }] });
+  assert.ok(r.ok, JSON.stringify(r));
+  assert.strictEqual(r.results.length, 6);
+  assert.deepStrictEqual(r.results.slice(0, 4).map(x => x.ok), [true, true, true, true]);
+  assert.strictEqual(r.results[0].member, '가나다');
+  assert.ok(Array.isArray(r.results[3].reservations));
+  assert.deepStrictEqual([r.results[4].code, r.results[5].code], ['bad_request', 'bad_request']);
+  // same answers as the single calls
+  assert.deepStrictEqual(r.results[1], h.as('가나다', { action: 'work.board' }));
 });
 test('setup() makes the DB tabs and syncs members', () => {
   const h = load({ books: {}, config: CONFIG, props: {} });

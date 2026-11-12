@@ -21,6 +21,7 @@ HOME_TABS = [
     ("dash:personal", "개인 품목 대시보드"),
     ("schedule", "일정"),
     ("work", "업무"),
+    ("requests", "업무 요청"),
     ("reservations", "장비 예약"),
     ("orders", "주문"),
     ("budget", "예산"),
