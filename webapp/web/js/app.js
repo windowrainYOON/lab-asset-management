@@ -648,91 +648,234 @@
   }
   function safeColor(c) { return /^#[0-9a-fA-F]{3,8}$/.test(c || '') ? c : '#8e8e93'; }
 
-  // ---------- 장비 예약 ----------
-  var resView = { mine: false };
+  // ---------- 장비 예약: a timetable like the desktop app (hours down, one machine, day or week) ----------
+  var resView = { mine: false, eq: '', mode: lsGet('lab_res_mode') === 'week' ? 'week' : 'day', scroll: null };
+  var RG_H = 52, RG_LEFT = 44;
+  function lsGet(k) { try { return localStorage.getItem(k) || ''; } catch (e) { return ''; } }
+  function lsSet(k, v) { try { localStorage.setItem(k, v); } catch (e) { /* private mode */ } }
+  function weekStartOf(ymd) { var d = dateOf(ymd); return addDays(ymd, -((d.getDay() + 6) % 7)); }
   function resScreen(day) {
     day = /^\d{4}-\d{2}-\d{2}$/.test(day || '') ? day : todayYmd();
-    var top = [navbar('장비 예약', iconButton('refresh', '새로 고침', function () { refresh('pull'); }), iconButton('plus', '새 예약', function () { resSheet(null, day, null, state.res); })),
-      el('div.month-row', iconButton('chevl', '전날', function () { go('res/' + addDays(day, -1)); }),
-        el('span.month', shortDay(day) + (day === todayYmd() ? ' 오늘' : '')),
-        iconButton('chevr', '다음날', function () { go('res/' + addDays(day, 1)); })),
-      chips([['all', '모든 장비'], ['mine', '내 예약']], resView.mine ? 'mine' : 'all', function (v) { resView.mine = v === 'mine'; resScreen(day); })];
-    load(top, function () { return cached('reservation.list', resView.mine ? { from: todayYmd(), to: addDays(todayYmd(), 30) } : { from: day, to: day }); }, function (r) {
+    var week = resView.mode === 'week' && !resView.mine;
+    var from = week ? weekStartOf(day) : day, to = week ? addDays(from, 6) : day;
+    var step = week ? 7 : 1;
+    var DAYS1 = ['일', '월', '화', '수', '목', '금', '토'];
+    function dateLabel() {
+      if (!week) return [shortDay(day), day === todayYmd() ? el('b.rg-today-t', '오늘') : null];
+      var a = dateOf(from), b = dateOf(to);
+      return (a.getMonth() + 1) + '월 ' + a.getDate() + '일 – ' + (a.getMonth() === b.getMonth() ? '' : (b.getMonth() + 1) + '월 ') + b.getDate() + '일';
+    }
+    var top = [navbar('장비 예약', iconButton('refresh', '새로 고침', function () { refresh('pull'); }),
+      iconButton('plus', '새 예약', function () { resSheet(null, day < todayYmd() ? todayYmd() : day, { eq: resView.eq }, state.res); }))];
+    load(top, function () {
+      return cached('reservation.list', resView.mine ? { from: todayYmd(), to: addDays(todayYmd(), 30) } : { from: from, to: to });
+    }, function (r) {
       state.res = r;
+      var eqs = r.equipment || [];
+      if (!eqs.some(function (e) { return e.id === resView.eq; })) resView.eq = (eqs.filter(function (e) { return e.state !== '점검 중'; })[0] || eqs[0] || {}).id || '';
+      var eq = eqs.filter(function (e) { return e.id === resView.eq; })[0];
+      var chipsRow = el('div.rg-eqs', eqs.map(function (e) {
+        var off = e.state === '점검 중';
+        return el('button.rg-eq' + (off ? '.off' : ''), { type: 'button', 'aria-pressed': !resView.mine && e.id === resView.eq ? 'true' : 'false',
+          onclick: function () { resView.eq = e.id; resView.mine = false; resView.scroll = null; resScreen(day); } },
+          el('i', { style: 'background:' + safeColor(e.color) }), e.name + (off ? ' · 점검 중' : ''));
+      }).concat([el('button.rg-eq.rg-mine', { type: 'button', 'aria-pressed': resView.mine ? 'true' : 'false',
+        onclick: function () { resView.mine = !resView.mine; resScreen(day); } }, '내 예약')]));
       if (resView.mine) {
         var mine = r.reservations.filter(function (x) { return x.mine && x.end > r.now; });
-        return [mine.length ? list(mine.map(function (x) {
+        return [chipsRow, mine.length ? list(mine.map(function (x) {
+          var e = eqs.filter(function (q) { return q.id === x.equipmentId; })[0];
           return row({ title: x.equipment, sub: shortDay(x.start.slice(0, 10)) + ' ' + hm(x.start) + '–' + hm(x.end) + (x.purpose ? ' · ' + x.purpose : ''),
+            lead: el('span.sw', { style: 'background:' + safeColor(e && e.color) }),
             onclick: function () { resSheet(x, x.start.slice(0, 10), null, r); } });
         })) : el('p.empty-note', '앞으로 30일 동안 내 예약이 없어요.'), footnote('예약을 누르면 수정하거나 취소할 수 있어요.')];
       }
-      var cards = r.equipment.map(function (eq) {
-        var mineRes = r.reservations.filter(function (x) { return x.equipmentId === eq.id; });
-        var tl = el('div.tl');
-        mineRes.forEach(function (x) {
-          var s = Math.max(8 * 60, x.start.slice(0, 10) < day ? 0 : toMin(x.start)), e = Math.min(22 * 60, x.end.slice(0, 10) > day ? 24 * 60 : toMin(x.end));
-          if (e <= s) return;
-          tl.appendChild(el('span.blk' + (x.mine ? '.mine' : ''), { style: 'left:' + ((s - 480) / 840 * 100).toFixed(1) + '%;width:' + ((e - s) / 840 * 100).toFixed(1) + '%;background:' + safeColor(eq.color) }));
-        });
-        if (day === todayYmd()) {
-          var nm = new Date().getHours() * 60 + new Date().getMinutes();
-          if (nm > 480 && nm < 1320) tl.appendChild(el('span.nowline', { style: 'left:' + ((nm - 480) / 840 * 100).toFixed(1) + '%' }));
-        }
-        var my = mineRes.filter(function (x) { return x.mine; })[0];
-        var next = eq.state === '점검 중' ? '점검 중이라 새 예약을 받지 않아요' :
-          (my ? '내 예약 ' + hm(my.start) + '–' + hm(my.end) + ' · ' : '') + nextFree(eq, mineRes, day);
-        return el('div.hig-card.eq', { 'data-interactive': true, onclick: function () { go('eq/' + eq.id + '/' + day); } },
-          el('div.eq-top', el('span.sw', { style: 'background:' + safeColor(eq.color) }), el('span.eq-n', eq.name),
-            eq.state === '점검 중' ? status('warning', '점검 중', true) : status('success', '사용 가능', true)),
-          el('div.eq-loc', [eq.location, eq.step + '분 단위', eq.maxHours ? '최대 ' + eq.maxHours + '시간' : '', eq.owner ? '담당 ' + eq.owner : ''].filter(Boolean).join(' · ')),
-          tl, el('div.tl-ax', ['8', '12', '16', '20', '22'].map(function (t) { return el('span', t); })), el('div.eq-next', next));
-      });
-      return [cards.length ? el('div.eqs', cards) : el('p.empty-note', '등록된 장비가 없어요. 데스크톱 앱에서 장비를 추가해요.'),
-        footnote('카드를 누르면 그 장비의 하루 시간표가 열리고, 빈 칸을 누르거나 + 로 새 예약을 만들어요.')];
+      if (!eq) return [chipsRow, el('p.empty-note', '등록된 장비가 없어요. 데스크톱 앱에서 장비를 추가해요.')];
+      var bar = el('div.rg-bar',
+        el('div.rg-date', iconButton('chevl', week ? '지난주' : '전날', function () { go('res/' + addDays(day, -step)); }),
+          el('span.rg-dt', dateLabel()), iconButton('chevr', week ? '다음 주' : '다음날', function () { go('res/' + addDays(day, step)); })),
+        el('div.rg-seg', { role: 'radiogroup' }, [['day', '일'], ['week', '주']].map(function (o) {
+          return el('button', { type: 'button', role: 'radio', 'aria-checked': resView.mode === o[0] ? 'true' : 'false', onclick: function () {
+            resView.mode = o[0]; lsSet('lab_res_mode', o[0]); resView.scroll = null; resScreen(day);
+          } }, o[1]);
+        })));
+      var meta = el('div.rg-meta', [eq.location, eq.step + '분 단위', eq.maxHours ? '최대 ' + eq.maxHours + '시간' : '', eq.owner ? '담당 ' + eq.owner : '',
+        eq.state === '점검 중' ? '점검 중이라 새 예약을 받지 않아요' : ''].filter(Boolean).join(' · '));
+      var days = [];
+      for (var i = 0; i < (week ? 7 : 1); i++) days.push(addDays(from, i));
+      var res = r.reservations.filter(function (x) { return x.equipmentId === eq.id; });
+      return [chipsRow, bar, meta, resGrid(eq, days, res, r, week),
+        footnote(eq.state === '점검 중' ? (eq.note || '') : '빈 시간을 꾹 누른 채 끌면 새 예약, 예약을 누르면 수정·취소예요.' + (eq.note ? ' · ' + eq.note : ''))];
     });
+  }
+  function resGrid(eq, days, res, data, week) {
+    var today = todayYmd(), now = new Date(), nowMin = now.getHours() * 60 + now.getMinutes();
+    var color = safeColor(eq.color), stepMin = Math.max(5, eq.step || 30), cols = days.length;
+    var card = el('div.rg-card' + (week ? '.wk' : ''));
+    if (week) card.appendChild(el('div.rg-head', days.map(function (d) {
+      var dt = dateOf(d);
+      return el('span' + (d === today ? '.rg-today' : ''), dt.getDate() + ' ' + '일월화수목금토'[dt.getDay()]);
+    })));
+    var body = el('div.rg-body');
+    var inner = el('div.rg-in', { style: 'height:' + (24 * RG_H + 12) + 'px' });
+    body.appendChild(inner);
+    card.appendChild(body);
+    function colW() { return (inner.clientWidth - RG_LEFT) / cols; }
+    function pct(i) { return 'calc(' + RG_LEFT + 'px + (100% - ' + RG_LEFT + 'px) * ' + (i / cols) + ')'; }
+    var wpct = 'calc((100% - ' + RG_LEFT + 'px) / ' + cols + ')';
+    function y(m) { return 6 + m / 60 * RG_H; }
+    for (var h = 0; h <= 24; h++) {
+      inner.appendChild(el('div.rg-h', { style: 'top:' + y(h * 60) + 'px' }));
+      if (h < 24) inner.appendChild(el('div.rg-hl', { style: 'top:' + y(h * 60) + 'px' }, h + ':00'));
+      if (!week && h < 24) inner.appendChild(el('div.rg-h.half', { style: 'top:' + y(h * 60 + 30) + 'px' }));
+    }
+    days.forEach(function (d, i) {
+      inner.appendChild(el('div.rg-col' + (d === today ? '.rg-today' : ''), { style: 'left:' + pct(i) + ';width:' + wpct }));
+      if (d < today) inner.appendChild(el('div.rg-past', { style: 'left:' + pct(i) + ';width:' + wpct + ';height:' + y(24 * 60) + 'px' }));
+      if (d === today) {
+        inner.appendChild(el('div.rg-past', { style: 'left:' + pct(i) + ';width:' + wpct + ';height:' + y(nowMin) + 'px' }));
+        inner.appendChild(el('div.rg-now', { style: 'left:' + pct(i) + ';width:' + wpct + ';top:' + y(nowMin) + 'px' }));
+      }
+    });
+    function segs(s, e) {   // one piece per day column a time range touches
+      var out = [];
+      days.forEach(function (d, i) {
+        var ds = d + ' 00:00', de = addDays(d, 1) + ' 00:00';
+        if (s < de && ds < e) out.push({ i: i, a: s > ds ? toMin(s) : 0, b: e < de ? toMin(e) : 24 * 60 });
+      });
+      return out;
+    }
+    res.forEach(function (x) {
+      segs(x.start, x.end).forEach(function (g) {
+        var a = x.mine ? 32 : 18;
+        var b = el('div.rg-b' + (week ? '.wk' : ''), { style: '--c:' + color + ';left:calc(' + pct(g.i) + ' + 2px);width:calc(' + wpct + ' - 5px);top:' + (y(g.a) + 1) +
+          'px;height:' + Math.max(16, y(g.b) - y(g.a) - 2) + 'px;background:color-mix(in srgb,' + color + ' ' + a + '%,transparent)',
+          onclick: function (ev) { ev.stopPropagation(); resSheet(x, x.start.slice(0, 10), null, data); } },
+          x.person + (x.mine && !week ? ' (나)' : ''),
+          el('small', week ? hm(x.start) : hm(x.start) + '–' + hm(x.end) + (x.purpose ? ' · ' + x.purpose : '')));
+        inner.appendChild(b);
+      });
+    });
+
+    // ---- touch: a tap books that slot; press 0.3 s then drag to book a range (a plain swipe scrolls) ----
+    var off = eq.state === '점검 중';
+    var drag = null, timer = null, startPt = null, draftEl = null, bub = null;
+    function at(cx, cy) {
+      var rc = inner.getBoundingClientRect();
+      var i = Math.max(0, Math.min(cols - 1, Math.floor((cx - rc.left - RG_LEFT) / colW())));
+      var m = Math.floor(((cy - rc.top - 6) / RG_H * 60) / stepMin) * stepMin;
+      return { i: i, m: Math.max(0, Math.min(24 * 60 - stepMin, m)), inGrid: cx - rc.left >= RG_LEFT };
+    }
+    function range() {
+      var a = drag.a, b = drag.b;
+      var s = Math.min(a.m, b.m), e = Math.max(a.m, b.m) + stepMin;
+      if (e - s < stepMin * 2 && !drag.moved) e = Math.min(24 * 60, s + Math.max(stepMin, 60));
+      return { d: days[a.i], s: s, e: e };
+    }
+    function clash(t) {
+      var s = t.d + ' ' + minText(t.s), e = t.e >= 24 * 60 ? addDays(t.d, 1) + ' 00:00' : t.d + ' ' + minText(t.e);
+      return res.some(function (x) { return s < x.end && x.start < e; });
+    }
+    function paint() {
+      var t = range(), bad = clash(t);
+      if (!draftEl) { draftEl = el('div.rg-draft'); bub = el('div.rg-bub'); inner.appendChild(draftEl); inner.appendChild(bub); }
+      draftEl.className = 'rg-draft' + (bad ? ' bad' : '');
+      draftEl.setAttribute('style', '--c:' + color + ';left:calc(' + pct(drag.a.i) + ' + 2px);width:calc(' + wpct + ' - 5px);top:' + (y(t.s) + 1) + 'px;height:' + (y(t.e) - y(t.s) - 2) + 'px');
+      draftEl.textContent = '';
+      draftEl.appendChild(document.createTextNode(bad ? '겹쳐요' : '새 예약'));
+      draftEl.appendChild(el('small', minText(t.s) + '–' + minText(t.e)));
+      var len = t.e - t.s;
+      bub.textContent = '';
+      bub.appendChild(document.createTextNode(minText(t.s) + '–' + minText(t.e)));
+      bub.appendChild(el('span', (len >= 60 ? Math.floor(len / 60) + '시간' : '') + (len % 60 ? ' ' + (len % 60) + '분' : '')));
+      var leftPx = RG_LEFT + (drag.a.i + 1) * colW() > inner.clientWidth - 150 ? Math.max(4, RG_LEFT + drag.a.i * colW() - 150) : RG_LEFT + (drag.a.i + (week ? 1 : 0.35)) * colW();
+      bub.style.left = Math.min(inner.clientWidth - 150, leftPx) + 'px';
+      bub.style.top = (y(t.e) - 16) + 'px';
+    }
+    function clear() {
+      clearTimeout(timer); timer = null;
+      if (draftEl) { draftEl.remove(); bub.remove(); draftEl = bub = null; }
+      card.classList.remove('dragging');
+      drag = null;
+    }
+    function begin(p) {
+      if (off) { toast('점검 중이라 예약할 수 없어요'); return; }
+      drag = { a: p, b: p, moved: false };
+      card.classList.add('dragging');
+      if (navigator.vibrate) try { navigator.vibrate(8); } catch (e) { /* ignore */ }
+      paint();
+    }
+    function finish() {
+      var t = range();
+      var bad = clash(t);
+      clear();
+      if (bad) { toast('다른 예약과 겹쳐요'); return; }
+      resSheet(null, t.d, { eq: eq.id, start: minText(t.s), end: t.e >= 24 * 60 ? '24:00' : minText(t.e) }, data);
+    }
+    inner.addEventListener('pointerdown', function (ev) {
+      if (ev.target.closest('.rg-b') || (ev.pointerType === 'mouse' && ev.button !== 0)) return;
+      var p = at(ev.clientX, ev.clientY);
+      if (!p.inGrid) return;
+      startPt = { x: ev.clientX, y: ev.clientY, p: p, t: Date.now(), touch: ev.pointerType !== 'mouse' };
+      if (startPt.touch) timer = setTimeout(function () { timer = null; begin(p); }, 300);
+      else { begin(p); try { inner.setPointerCapture(ev.pointerId); } catch (e) { /* ignore */ } }
+    });
+    inner.addEventListener('pointermove', function (ev) {
+      if (!startPt) return;
+      if (timer && Math.abs(ev.clientY - startPt.y) + Math.abs(ev.clientX - startPt.x) > 8) { clearTimeout(timer); timer = null; startPt = null; return; }
+      if (!drag) return;
+      var p = at(ev.clientX, ev.clientY);
+      p.i = drag.a.i;   // a booking stays on the day it started
+      if (p.m !== drag.b.m) { drag.b = p; drag.moved = true; paint(); }
+    });
+    function up() {
+      if (!startPt) return;
+      var sp = startPt; startPt = null;
+      if (timer) {   // a short tap on an empty slot: book from there
+        clearTimeout(timer); timer = null;
+        if (off) { toast('점검 중이라 예약할 수 없어요'); return; }
+        drag = { a: sp.p, b: sp.p, moved: false };
+        return finish();
+      }
+      if (drag) finish();
+    }
+    inner.addEventListener('pointerup', up);
+    inner.addEventListener('pointercancel', function () { if (!drag) { clearTimeout(timer); timer = null; startPt = null; } });
+    // while a drag is on, the finger moves the booking, not the page
+    inner.addEventListener('touchmove', function (ev) { if (drag) ev.preventDefault(); }, { passive: false });
+    inner.addEventListener('touchend', function () { if (drag) up(); });
+    inner.addEventListener('contextmenu', function (ev) { ev.preventDefault(); });
+
+    body.addEventListener('scroll', function () { resView.scroll = body.scrollTop; }, { passive: true });
+    setTimeout(function () {
+      var first = days.indexOf(today) >= 0 ? Math.max(0, nowMin - 120) : 8 * 60;
+      body.scrollTop = resView.scroll != null ? resView.scroll : y(first) - 4;
+    }, 0);
+    return card;
   }
   function toMin(stamp) { return +stamp.slice(11, 13) * 60 + +stamp.slice(14, 16); }
   function minText(m) { return pad(Math.floor(m / 60)) + ':' + pad(m % 60); }
-  function nextFree(eq, res, day) {
-    var from = 8 * 60;
-    if (day === todayYmd()) { var n = new Date(); from = Math.max(from, Math.ceil((n.getHours() * 60 + n.getMinutes()) / eq.step) * eq.step); }
-    if (day < todayYmd()) return '지난 날';
-    for (var t = from; t < 22 * 60; t += eq.step) {
-      var busy = res.some(function (x) { var s = x.start.slice(0, 10) < day ? 0 : toMin(x.start), e = x.end.slice(0, 10) > day ? 1440 : toMin(x.end); return s <= t && t < e; });
-      if (!busy) return '다음 빈 시간 ' + minText(t);
-    }
-    return '오늘은 22시까지 꽉 찼어요';
-  }
 
-  function eqScreen(id, day) {
-    day = /^\d{4}-\d{2}-\d{2}$/.test(day || '') ? day : todayYmd();
-    load(navbar('시간표', backButton('res/' + day), iconButton('plus', '새 예약', function () { resSheet(null, day, { eq: id }, state.res); })),
-      function () { return cached('reservation.list', { from: day, to: day }); }, function (r) {
-        state.res = r;
-        var eq = r.equipment.filter(function (e) { return e.id === id; })[0];
-        if (!eq) return el('p.empty-note', '장비를 찾지 못했어요.');
-        var res = r.reservations.filter(function (x) { return x.equipmentId === id; });
-        var rows = [];
-        var now = nowStamp();
-        for (var t = 8 * 60; t < 22 * 60; t += Math.max(eq.step, 30)) (function (t) {
-          var stamp = day + ' ' + minText(t);
-          var hit = res.filter(function (x) { return x.start <= stamp && stamp < x.end; })[0];
-          if (hit) {
-            if (hit.start !== stamp && hit.start.slice(0, 10) === day && rows.length) return;
-            rows.push(el('li.hig-list__row', { 'data-interactive': true, onclick: function () { resSheet(hit, day, null, r); } },
-              el('span.slot-t', minText(t)), el('span.sw', { style: 'background:' + safeColor(eq.color) + (hit.mine ? '' : ';opacity:.5') }),
-              el('span.hig-list__text', el('span.hig-list__title', hit.person + (hit.mine ? ' (나)' : '')), el('span.hig-list__subtitle', hm(hit.start) + '–' + hm(hit.end) + (hit.purpose ? ' · ' + hit.purpose : ''))), chevron()));
-          } else if (stamp < now) {
-            rows.push(el('li.hig-list__row', el('span.slot-t.slot-past', minText(t)), el('span.hig-list__title.slot-past', '지남')));
-          } else {
-            rows.push(el('li.hig-list__row', { 'data-interactive': eq.state !== '점검 중' ? true : null, onclick: eq.state === '점검 중' ? null : function () {
-              resSheet(null, day, { eq: id, start: minText(t) }, r);
-            } }, el('span.slot-t', minText(t)), el('span.hig-list__title' + (eq.state === '점검 중' ? '' : '.slot-free'), eq.state === '점검 중' ? '점검 중' : '비어 있음 · 눌러서 예약')));
-          }
-        })(t);
-        return [el('div.notice', el('h2.nt', eq.name), el('div.nm', shortDay(day) + ' · ' + [eq.location, eq.step + '분 단위', eq.maxHours ? '최대 ' + eq.maxHours + '시간' : ''].filter(Boolean).join(' · '))),
-          el('ul.hig-list.m.slots', rows), eq.note ? footnote(eq.note) : null];
-      });
+  /** A small centered "…중" box while a save and the refresh after it run. */
+  function busyHud(text) {
+    var dim = el('div.hud-dim');
+    var t = el('div.hud-t', text), sub = el('small', '');
+    var box = el('div.hud', { role: 'status', 'aria-live': 'polite' }, el('div.hud-sp'), t, sub);
+    document.body.appendChild(dim); document.body.appendChild(box);
+    return {
+      sub: function (s) { sub.textContent = s; },
+      done: function () { dim.remove(); box.remove(); }
+    };
+  }
+  /** Save → refresh what the screen shows → close the HUD. A failure leaves the sheet open with its error. */
+  function savingWith(text, doneText, work, sh) {
+    var hud = busyHud(text);
+    return work().then(function () {
+      hud.sub('최신 예약을 다시 받는 중');
+      if (sh) sh.close();
+      route_();
+      return Promise.resolve(state.loading).catch(function () { /* the screen shows its own error */ });
+    }).then(function () { hud.done(); toast(doneText); }, function (e) { hud.done(); throw e; });
   }
 
   /** New or edit booking sheet. data = the loaded reservation.list answer (equipment + that day's bookings). */
@@ -769,7 +912,7 @@
         while (m0 < 22 * 60 && busy(m0)) m0 += step;
         s0 = minText(m0);
       }
-      var keepS = startSel.input.value || s0, keepE = endSel.input.value || (res ? hm(res.end) : '');
+      var keepS = startSel.input.value || s0, keepE = endSel.input.value || (res ? hm(res.end) : preset.end || '');
       fill(startSel, 0, 24 * 60 - step, step, keepS || '09:00');
       if (!startSel.input.value) startSel.input.selectedIndex = Math.floor(9 * 60 / step);
       var s = toMin('0000-00-00 ' + startSel.input.value);
@@ -809,17 +952,15 @@
       res ? el('div.cancel-row', el('button.hig-delete.hig-delete--label', { type: 'button', onclick: function () {
         ask('예약을 취소할까요?', res.equipment + ' ' + shortDay(res.start.slice(0, 10)) + ' ' + hm(res.start) + '–' + hm(res.end), '예약 취소', true).then(function (yes) {
           if (!yes) return;
-          write('reservation.cancel', { id: res.id }, '취소할').then(function () { sh.close(); toast('예약을 취소했어요'); route_(); }, failed);
+          savingWith('취소하는 중…', '예약을 취소했어요', function () { return write('reservation.cancel', { id: res.id }, '취소할'); }, sh).catch(failed);
         });
       } }, icon('trash'), '예약 취소…')) : null);
     var sh = sheet(res ? '예약 수정' : '새 예약', body, function () {
       var t = validate();
       var payload = { equipmentId: eqSel.input.value, start: t.s, end: t.e, purpose: purpose.value, notify: +notify.input.value };
       if (res) payload.id = res.id;
-      return write(res ? 'reservation.update' : 'reservation.create', payload, '바꿀').then(function () {
-        toast(res ? '예약을 고쳤어요' : '예약했어요');
-        route_();
-      });
+      return savingWith(res ? '바꾸는 중…' : '예약 추가 중…', res ? '예약을 고쳤어요' : '예약했어요 · ' + hm(t.s) + '–' + (t.e.slice(11, 16) === '00:00' ? '24:00' : hm(t.e)),
+        function () { return write(res ? 'reservation.update' : 'reservation.create', payload, '바꿀'); }, sh);
     });
     times();
   }
@@ -1121,7 +1262,7 @@
       case 'me': return meScreen();
       case 'schedule': return scheduleScreen();
       case 'res': return resScreen(p[1]);
-      case 'eq': return eqScreen(p[1], p[2]);
+      case 'eq': resView.eq = p[1] || resView.eq; resView.mine = false; return resScreen(p[2]);
       case 'work': return workScreen();
       case 'lab': return labScreen();
       case 'notices': return noticesScreen();
