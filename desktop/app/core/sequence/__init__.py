@@ -14,11 +14,12 @@ from .snapgene import DnaRecord, Feature, parse_dna
 from .tm import melting_temp
 from .enzymes import CutSite, EnzymeHit, REBASE, parse_cut_site, cut_site_for, find_cuts
 from .oligo_match import Oligo, OligoHit, match_oligo, match_all
-from .library import SequenceLibrary, Plasmid
+from .summary import IndexCache, PlasmidSummary
+from .library import SequenceLibrary, Plasmid, FileEntry
 
 __all__ = [
     "DnaRecord", "Feature", "parse_dna", "melting_temp",
     "CutSite", "EnzymeHit", "REBASE", "parse_cut_site", "cut_site_for", "find_cuts",
     "Oligo", "OligoHit", "match_oligo", "match_all",
-    "SequenceLibrary", "Plasmid",
+    "SequenceLibrary", "Plasmid", "FileEntry", "PlasmidSummary", "IndexCache",
 ]

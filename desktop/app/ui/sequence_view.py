@@ -18,12 +18,14 @@ from __future__ import annotations
 
 import zlib
 from dataclasses import dataclass
+from datetime import datetime
 
 from PySide6.QtCore import QRect, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (
-    QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QHBoxLayout, QLabel,
-    QPushButton, QScrollArea, QSizePolicy, QSpinBox, QVBoxLayout, QWidget,
+    QAbstractItemView, QDialog, QDialogButtonBox, QDoubleSpinBox, QHBoxLayout,
+    QHeaderView, QLabel, QLineEdit, QPushButton, QScrollArea, QSizePolicy,
+    QSpinBox, QStackedWidget, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
 from ..core import settings
@@ -33,11 +35,46 @@ from ..core.sequence.library import Plasmid
 from ..core.sequence.oligo_match import OligoHit
 from .inset import InsetGroup, inset_title, value_label
 from .theme import tokens
-from .widgets import InspectorPanel, fit_select
+from .widgets import InspectorPanel
 
 TAB_KEYS = {"seq:common": "Common Plasmid", "seq:personal": "Personal Plasmid"}
 DEFAULT_PER_ROW = 60
 FEATURE_TOKENS = ("chart-1", "chart-2", "chart-3", "chart-4", "chart-5", "chart-6")
+
+
+def _when(stamp: str) -> str:
+    """An index time the way the table shows it: 방금 / 12분 전 / 11월 9일."""
+    if not stamp:
+        return "아직 없음"
+    try:
+        then = datetime.fromisoformat(stamp)
+    except ValueError:
+        return stamp
+    gap = datetime.now() - then
+    minutes = int(gap.total_seconds() // 60)
+    if minutes < 1:
+        return "방금"
+    if minutes < 60:
+        return f"{minutes}분 전"
+    if gap.days < 1:
+        return f"{minutes // 60}시간 전"
+    if gap.days == 1:
+        return "어제"
+    return f"{then.month}월 {then.day}일"
+
+
+class _NumberCell(QTableWidgetItem):
+    """A right-aligned cell that sorts by its number, not by "11,294" < "5,735"."""
+
+    def __init__(self, text: str, value: float):
+        super().__init__(text)
+        self.value = value
+        self.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+
+    def __lt__(self, other) -> bool:  # noqa: D105
+        if isinstance(other, _NumberCell):
+            return self.value < other.value
+        return super().__lt__(other)
 
 
 def _mono(size: int = 12) -> QFont:
@@ -479,6 +516,7 @@ class SequenceInspector(InspectorPanel):
 
     open_stock = Signal(str, str)     # category name, item name
     fill_requested = Signal()
+    open_requested = Signal(str)      # file key of the map to read and draw
 
     def __init__(self, parent=None):
         super().__init__()
@@ -553,6 +591,47 @@ class SequenceInspector(InspectorPanel):
         for button in buttons:
             lay.addWidget(button)
         self.box.addWidget(row)
+
+    # ---- the list ----
+    def show_summary(self, library: SequenceLibrary, summary) -> None:
+        """A row of the table: everything the stored index knows, and nothing more.
+
+        No sequence has been read at this point, so there are no positions here.
+        The button below is what reads this one file.
+        """
+        self.library, self.plasmid = library, None
+        self._clear()
+        if summary is None:
+            self._crumb("Sequence Map")
+            self._title("선택한 플라스미드 없음", "왼쪽 표에서 플라스미드를 고르세요.")
+            self.box.addStretch(1)
+            return
+        self._crumb(f"{summary.group} · SnapGene 파일")
+        self._title(summary.name, f"{summary.length:,} bp · {summary.topology}")
+        self._group("", [
+            ("feature", f"{summary.features}개"),
+            ("색인 시각", _when(summary.indexed_at)),
+        ])
+        self._group("결합 올리고 요약", [
+            ("3′ 끝까지 붙음", f"{summary.anneal}개"),
+            ("상동팔 · 부분 일치", f"{summary.arm}개"),
+        ])
+        singles = summary.singles
+        self._group("보유 효소 절단 요약", [
+            ("자르는 효소", f"{summary.cutters}종"),
+            ("단일 절단", f"{len(singles)}종"),
+        ])
+        if singles:
+            self._note("1회만 자르는 효소", ", ".join(singles[:14])
+                       + (f" 외 {len(singles) - 14}종" if len(singles) > 14 else ""))
+        self._note("여기까지는 저장된 색인입니다",
+                   "서열과 절단 위치, 올리고가 붙는 자리는 아래 버튼으로 이 파일을 열 때 읽습니다. "
+                   "목록을 넘기는 동안에는 서열을 읽지 않습니다.")
+        button = QPushButton("서열 열기")
+        button.setDefault(True)
+        button.clicked.connect(lambda: self.open_requested.emit(summary.key))
+        self._buttons(button)
+        self.box.addStretch(1)
 
     # ---- the three kinds ----
     def show_plasmid(self, library: SequenceLibrary, plasmid: Plasmid | None) -> None:
@@ -662,7 +741,15 @@ class SequenceInspector(InspectorPanel):
 
 
 class SequenceView(QWidget):
-    """One Sequence Map tab: the plasmids of one group and the map of the chosen one."""
+    """One Sequence Map tab.
+
+    Two pages. The list is a table of every map in the group, drawn from the
+    stored index alone, so a folder of hundreds opens at once. Opening a row is
+    what reads that one file and draws its sequence on the second page.
+    """
+
+    COLUMNS = ("이름", "길이", "형태", "feature", "결합 올리고", "단일 절단 효소 (보유분)", "색인")
+    FILTERS = (("all", "전체"), ("single", "단일 절단 있음"), ("oligo", "결합 올리고 있음"))
 
     def __init__(self, window, group: str, parent=None):
         super().__init__(parent)
@@ -670,35 +757,124 @@ class SequenceView(QWidget):
         self.group = group
         self.library: SequenceLibrary | None = None
         self.plasmid: Plasmid | None = None
+        self.rows: list = []            # the summaries the table is showing
+        self.filter = "all"
         self.inspector = SequenceInspector()
         self.inspector.open_stock.connect(self._open_stock)
         self.inspector.fill_requested.connect(self.fill_cut_sites)
+        self.inspector.open_requested.connect(self.open_plasmid)
 
         layout = QVBoxLayout(self)
         margin = tokens.space("margin")
         layout.setContentsMargins(margin, margin, margin, margin)
         layout.setSpacing(tokens.space("gap-group"))
+        self.pages = QStackedWidget()
+        layout.addWidget(self.pages, 1)
+        self.pages.addWidget(self._build_list())
+        self.pages.addWidget(self._build_map())
 
-        self.crumb = QLabel(f"Sequence Map › {group}")
+    # ---- page 1: the table ----
+    def _build_list(self) -> QWidget:
+        page = QWidget()
+        lay = QVBoxLayout(page)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(tokens.space("gap-group"))
+
+        self.crumb = QLabel(f"Sequence Map › {self.group}")
         self.crumb.setFont(_ui(11))
         self.crumb.setStyleSheet(f"color: {tokens.css(tokens.text('label-secondary'))}")
-        layout.addWidget(self.crumb)
+        lay.addWidget(self.crumb)
 
-        head = QHBoxLayout()
-        self.title = QLabel(group)
+        self.title = QLabel(self.group)
         self.title.setFont(_ui(21, QFont.DemiBold))
-        head.addWidget(self.title)
-        head.addStretch(1)
-        self.picker = QComboBox()
-        self.picker.setMinimumWidth(240)
-        self.picker.currentIndexChanged.connect(self._picked_plasmid)
-        head.addWidget(self.picker)
-        layout.addLayout(head)
+        lay.addWidget(self.title)
 
         self.sub = QLabel("")
         self.sub.setFont(_ui(12))
         self.sub.setStyleSheet(f"color: {tokens.css(tokens.text('label-secondary'))}")
-        layout.addWidget(self.sub)
+        lay.addWidget(self.sub)
+
+        bar = QHBoxLayout()
+        bar.setSpacing(7)
+        self.filters: dict[str, QPushButton] = {}
+        for key, text in self.FILTERS:
+            button = QPushButton(text)
+            button.setCheckable(True)
+            button.setChecked(key == "all")
+            button.setProperty("chip", True)
+            button.clicked.connect(lambda _=False, k=key: self._set_filter(k))
+            bar.addWidget(button)
+            self.filters[key] = button
+        self.search = QLineEdit()
+        self.search.setPlaceholderText("이름 · 효소 · 올리고로 찾기")
+        self.search.setClearButtonEnabled(True)
+        self.search.setMaximumWidth(260)
+        self.search.textChanged.connect(lambda _: self._fill_table())
+        bar.addWidget(self.search)
+        bar.addStretch(1)
+        self.reindex_btn = QPushButton("색인 다시 만들기")
+        self.reindex_btn.clicked.connect(self.rebuild_index)
+        bar.addWidget(self.reindex_btn)
+        self.settings_btn = QPushButton("색인 설정")
+        self.settings_btn.clicked.connect(self.edit_settings)
+        bar.addWidget(self.settings_btn)
+        lay.addLayout(bar)
+
+        self.table = QTableWidget(0, len(self.COLUMNS))
+        self.table.setHorizontalHeaderLabels(list(self.COLUMNS))
+        self.table.verticalHeader().setVisible(False)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table.setAlternatingRowColors(False)
+        self.table.setShowGrid(False)
+        self.table.setWordWrap(False)
+        self.table.setSortingEnabled(True)
+        header = self.table.horizontalHeader()
+        header.setStretchLastSection(False)
+        for col, mode in enumerate((QHeaderView.Stretch, QHeaderView.ResizeToContents,
+                                    QHeaderView.ResizeToContents, QHeaderView.ResizeToContents,
+                                    QHeaderView.ResizeToContents, QHeaderView.Stretch,
+                                    QHeaderView.ResizeToContents)):
+            header.setSectionResizeMode(col, mode)
+        self.table.sortByColumn(0, Qt.AscendingOrder)
+        self.table.itemSelectionChanged.connect(self._picked_row)
+        self.table.itemDoubleClicked.connect(lambda _: self._open_selected())
+        self.table.activated.connect(lambda _: self._open_selected())
+        lay.addWidget(self.table, 1)
+
+        self.hint = QLabel("표는 저장된 색인에서 바로 그립니다 · 행을 열 때만 그 파일의 서열을 읽습니다")
+        self.hint.setFont(_ui(10))
+        self.hint.setStyleSheet(f"color: {tokens.css(tokens.text('label-secondary'))}")
+        lay.addWidget(self.hint)
+        return page
+
+    # ---- page 2: one map ----
+    def _build_map(self) -> QWidget:
+        page = QWidget()
+        lay = QVBoxLayout(page)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(tokens.space("gap-group"))
+
+        top = QHBoxLayout()
+        self.back_btn = QPushButton("‹ 목록")
+        self.back_btn.clicked.connect(self.show_list)
+        top.addWidget(self.back_btn)
+        self.map_crumb = QLabel("")
+        self.map_crumb.setFont(_ui(11))
+        self.map_crumb.setStyleSheet(f"color: {tokens.css(tokens.text('label-secondary'))}")
+        top.addWidget(self.map_crumb)
+        top.addStretch(1)
+        lay.addLayout(top)
+
+        self.map_title = QLabel("")
+        self.map_title.setFont(_ui(21, QFont.DemiBold))
+        lay.addWidget(self.map_title)
+
+        self.map_sub = QLabel("")
+        self.map_sub.setFont(_ui(12))
+        self.map_sub.setStyleSheet(f"color: {tokens.css(tokens.text('label-secondary'))}")
+        lay.addWidget(self.map_sub)
 
         chips = QHBoxLayout()
         chips.setSpacing(7)
@@ -712,14 +888,11 @@ class SequenceView(QWidget):
             chips.addWidget(button)
             self.chips[key] = button
         chips.addStretch(1)
-        self.settings_btn = QPushButton("색인 설정")
-        self.settings_btn.clicked.connect(self.edit_settings)
-        chips.addWidget(self.settings_btn)
-        layout.addLayout(chips)
+        lay.addLayout(chips)
 
         self.overview = OverviewStrip()
         self.overview.moved.connect(self._scroll_to_base)
-        layout.addWidget(self.overview)
+        lay.addWidget(self.overview)
 
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
@@ -729,54 +902,142 @@ class SequenceView(QWidget):
         self.canvas.picked.connect(self._picked_object)
         self.scroll.setWidget(self.canvas)
         self.scroll.verticalScrollBar().valueChanged.connect(self._sync_overview)
-        layout.addWidget(self.scroll, 1)
+        lay.addWidget(self.scroll, 1)
 
         self.legend = QLabel("")
         self.legend.setFont(_ui(10))
         self.legend.setStyleSheet(f"color: {tokens.css(tokens.text('label-secondary'))}")
-        layout.addWidget(self.legend)
+        lay.addWidget(self.legend)
+        return page
 
     # ---- data ----
     def set_library(self, library: SequenceLibrary | None) -> None:
+        if library is self.library and self.plasmid is not None:
+            self._fill_table()      # coming back to the tab keeps the open map
+            return
         self.library = library
-        self.picker.blockSignals(True)
-        self.picker.clear()
-        plasmids = library.in_group(self.group) if library else []
-        for plasmid in plasmids:
-            self.picker.addItem(plasmid.name, plasmid.key)
-        fit_select(self.picker)
-        self.picker.blockSignals(False)
-        self._show_plasmid(plasmids[0] if plasmids else None)
+        self.plasmid = None
+        self._fill_table()
+        self.show_list()
 
     def refresh(self) -> None:
-        if self.library is not None:
+        if self.plasmid is not None:
             self._show_plasmid(self.plasmid)
+        else:
+            self._fill_table()
+
+    def _summaries(self) -> list:
+        return self.library.in_group(self.group) if self.library else []
+
+    def _set_filter(self, key: str) -> None:
+        self.filter = key
+        for name, button in self.filters.items():
+            button.setChecked(name == key)
+        self._fill_table()
+
+    def _keep(self, summary) -> bool:
+        if not summary.matches(self.search.text()):
+            return False
+        if self.filter == "single":
+            return bool(summary.singles)
+        if self.filter == "oligo":
+            return bool(summary.anneal or summary.arm)
+        return True
+
+    def _fill_table(self) -> None:
+        every = self._summaries()
+        self.rows = [s for s in every if self._keep(s)]
+        self.table.setSortingEnabled(False)
+        self.table.setRowCount(len(self.rows))
+        for row, s in enumerate(self.rows):
+            singles = s.singles
+            names = ", ".join(singles[:4]) + (" …" if len(singles) > 4 else "")
+            oligos = f"{s.anneal}" + (f"  (상동팔 {s.arm})" if s.arm else "")
+            cells = (s.name, f"{s.length:,}", s.topology, str(s.features),
+                     oligos, f"{len(singles)}   {names}" if singles else "0",
+                     _when(s.indexed_at))
+            numbers = {1: s.length, 3: s.features, 4: s.anneal, 5: len(singles)}
+            for col, text in enumerate(cells):
+                item = (_NumberCell(text, numbers[col]) if col in numbers
+                        else QTableWidgetItem(text))
+                if col == 0:
+                    item.setData(Qt.UserRole, s.key)
+                self.table.setItem(row, col, item)
+        self.table.setSortingEnabled(True)
+        total = len(every)
+        shown = f"{total}개" if total == len(self.rows) else f"{total}개 중 {len(self.rows)}개"
+        waiting = len(self.library.pending()) if self.library else 0
+        more = f" · 색인 대기 {waiting}개" if waiting else ""
+        stock = (f" · 보유 효소 {len(self.library.enzymes)}종 · 올리고 {len(self.library.oligos)}개"
+                 if self.library else "")
+        self.sub.setText(f"플라스미드 {shown}{stock}{more}"
+                         if total else "Sequence Map 폴더에 .dna 파일이 없습니다.")
+        if self.rows and not self.table.selectedItems():
+            self.table.selectRow(0)
+        elif not self.rows:
+            self.inspector.show_summary(self.library, None)
+
+    def _selected_key(self) -> str:
+        items = self.table.selectedItems()
+        if not items:
+            return ""
+        item = self.table.item(items[0].row(), 0)
+        return str(item.data(Qt.UserRole)) if item else ""
+
+    def _picked_row(self) -> None:
+        key = self._selected_key()
+        summary = self.library.summaries.get(key) if self.library else None
+        self.inspector.show_summary(self.library, summary)
+
+    def _open_selected(self) -> None:
+        key = self._selected_key()
+        if key:
+            self.open_plasmid(key)
+
+    def open_plasmid(self, key: str) -> None:
+        """Read this one map and draw it. The only step that touches a sequence."""
+        if self.library is None:
+            return
+        plasmid = self.library.open(key)
+        if plasmid is None:
+            return
+        self._show_plasmid(plasmid)
+        self.pages.setCurrentIndex(1)
+
+    def show_list(self) -> None:
+        self.plasmid = None
+        self.pages.setCurrentIndex(0)
+        self._fill_table()
+        self._picked_row()
 
     def _show_plasmid(self, plasmid: Plasmid | None) -> None:
         self.plasmid = plasmid
         self.canvas.set_plasmid(self.library, plasmid)
         self.overview.set_plasmid(plasmid)
         if plasmid is None:
-            self.title.setText(self.group)
-            self.sub.setText("Sequence Map 폴더에 .dna 파일이 없습니다.")
-            self.inspector.show_plasmid(self.library, None)
+            self.show_list()
             return
-        self.title.setText(plasmid.name)
+        self.map_crumb.setText(f"Sequence Map › {self.group} › {plasmid.name}")
+        self.map_title.setText(plasmid.name)
         cutting = sum(1 for hits in plasmid.cuts.values() if hits)
+        unique = len(plasmid.unique_cutters())
         hits = self.library.plasmid_hits(plasmid.key) if self.library else []
-        self.sub.setText(f"{plasmid.length:,} bp · {plasmid.topology} · "
-                         f"보유 효소 {len(plasmid.cuts)}종 중 {cutting}종이 절단 · "
-                         f"결합 올리고 {len(hits)}개")
+        anneal = sum(1 for h in hits if h.anneals)
+        self.map_sub.setText(f"{plasmid.length:,} bp · {plasmid.topology} · "
+                             f"보유 효소 {cutting}종 절단 (단일 {unique}종) · "
+                             f"결합 올리고 {anneal}개 · 상동팔 {len(hits) - anneal}개")
         self.legend.setText("빨강 절단 위치 · 파랑 3′ 붙는 올리고 · 주황 상동팔·부분 일치 · "
                             "정방향 위 · 역방향 아래 · 상보 가닥 항상 표시")
         self.inspector.show_plasmid(self.library, plasmid)
         self._sync_overview()
 
-    def _picked_plasmid(self, index: int) -> None:
-        if self.library is None or index < 0:
+    def rebuild_index(self) -> None:
+        """Read every map again, whatever the stored index says."""
+        if self.library is None:
             return
-        key = self.picker.itemData(index)
-        self._show_plasmid(self.library.plasmids.get(key))
+        self.library.cache.clear()
+        self.library.index()
+        self._fill_table()
 
     def _chips_changed(self) -> None:
         self.canvas.set_flags(features=self.chips["features"].isChecked(),

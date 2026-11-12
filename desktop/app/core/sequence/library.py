@@ -17,13 +17,18 @@ from pathlib import Path
 from .enzymes import CutSite, EnzymeHit, cut_site_for, find_cuts, normalize_name, parse_cut_site
 from .oligo_match import MIN_MATCH, MIN_TM, FULL_LENGTH, Oligo, OligoHit, match_all
 from .snapgene import DnaRecord, parse_dna
+from .summary import SCOPE_OF, IndexCache, PlasmidSummary, stamp_of
 
 SEQ_FOLDER = "Sequence Map"
 DNA_SUFFIX = ".dna"
 CUT_SITE_COLUMN = "cut site"
 OLIGO_CATEGORY = "oligos"
 ENZYME_CATEGORY = "restriction enzyme"
-SCOPE_OF = {"common plasmid": "common", "personal plasmid": "personal"}
+
+# How many opened maps to keep in memory. A map plus its lookup index is about
+# a megabyte, so holding every one of a few hundred would cost hundreds; the
+# table runs off the summaries instead and only what the user looks at is kept.
+MAX_OPEN = 3
 
 
 def nfc(text: str) -> str:
@@ -69,6 +74,17 @@ class Plasmid:
 
 
 @dataclass
+class FileEntry:
+    """One .dna file the folder holds, before anything has been read from it."""
+
+    key: str                  # Drive file id, or the path for a local folder
+    name: str                 # file name without .dna
+    group: str                # subfolder: "Common Plasmid" / "Personal Plasmid"
+    stamp: str = ""           # the file's revision, so a changed map is read again
+    path: Path | None = None  # set when the file is already on this Mac
+
+
+@dataclass
 class EnzymeStock:
     name: str                 # as written in the stock file
     site: CutSite | None
@@ -91,6 +107,11 @@ class SequenceLibrary:
     def __init__(self, remote=None, cache_dir: Path | None = None) -> None:
         self.remote = remote
         self.cache_dir = Path(cache_dir) if cache_dir else None
+        self.entries: dict[str, FileEntry] = {}          # every map the folder holds
+        self.summaries: dict[str, PlasmidSummary] = {}   # what the table draws
+        self.cache = IndexCache(self.cache_dir)
+        self._download = None
+        self._open_order: list[str] = []
         self.plasmids: dict[str, Plasmid] = {}
         self.oligos: dict[str, Oligo] = {}
         self.enzymes: dict[str, EnzymeStock] = {}
@@ -103,13 +124,24 @@ class SequenceLibrary:
 
     # ---- reading maps ----------------------------------------------------
     def load_folder(self, folder: Path) -> None:
-        """A plain folder on this Mac, used by the tests and by a local project."""
+        """A plain folder on this Mac, used by the tests and by a local project.
+
+        Small enough to read whole, so every map is parsed here and the table
+        has its rows without a second pass.
+        """
         folder = Path(folder)
-        for sub in sorted(p for p in folder.iterdir() if p.is_dir()):
-            for path in sorted(sub.glob(f"*{DNA_SUFFIX}")):
-                self._add(str(path), path.stem, sub.name, path.read_bytes())
-        for path in sorted(folder.glob(f"*{DNA_SUFFIX}")):
-            self._add(str(path), path.stem, "", path.read_bytes())
+        paths = [(p, sub.name) for sub in sorted(q for q in folder.iterdir() if q.is_dir())
+                 for p in sorted(sub.glob(f"*{DNA_SUFFIX}"))]
+        paths += [(p, "") for p in sorted(folder.glob(f"*{DNA_SUFFIX}"))]
+        for path, group in paths:
+            key = str(path)
+            try:
+                stamp = str(path.stat().st_mtime_ns)
+            except OSError:
+                stamp = ""
+            self.entries[key] = FileEntry(key, path.stem, group, stamp, path)
+            self._add(key, path.stem, group, path.read_bytes())
+        self.index()
 
     def load_remote(self) -> None:
         """Every .dna file under the Drive folder's Sequence Map subfolder."""
@@ -118,46 +150,74 @@ class SequenceLibrary:
         self.load_entries(self.remote.list_sequence_files(), self.remote.download)
 
     def load_entries(self, files, download) -> None:
-        """Cache and read a list of remote files.
+        """Note which maps the folder holds, without reading any of them.
 
         Takes the listing and a `download(file_id, dest)` callable rather than a
-        remote object, so it works with whichever remote the session has.
+        remote object, so it works with whichever remote the session has. A file
+        is only fetched when `index` or `open` actually needs its sequence.
         """
         if self.cache_dir is None:
             return
-        files = list(files)
-        dest_dir = self.cache_dir / "sequences"
-        dest_dir.mkdir(parents=True, exist_ok=True)
+        self._download = download
         for rf in files:
             name = nfc(rf.name)
             if not name.lower().endswith(DNA_SUFFIX) or name.startswith("~$"):
                 continue
-            dest = dest_dir / f"{rf.id}{DNA_SUFFIX}"
-            try:
-                if not dest.exists():
-                    download(rf.id, dest)
-                self._add(rf.id, Path(name).stem, nfc(getattr(rf, "folder", "")), dest.read_bytes())
-            except Exception as exc:  # noqa: BLE001  one bad file must not lose the rest
-                self.errors.append(f"{name}: {exc}")
+            stamp = str(getattr(rf, "version", "") or getattr(rf, "modified_time", "") or "")
+            self.entries[rf.id] = FileEntry(rf.id, Path(name).stem,
+                                            nfc(getattr(rf, "folder", "")), stamp)
+
+    def _local_path(self, entry: FileEntry) -> Path:
+        if entry.path is not None:
+            return entry.path
+        return self.cache_dir / "sequences" / f"{entry.key}{DNA_SUFFIX}"
+
+    def _bytes(self, entry: FileEntry) -> bytes:
+        """The file's content, fetching it when this Mac has no copy or a stale one.
+
+        The stamp is kept beside the download. Without it a map edited in
+        SnapGene and put back in the folder would keep showing the old version,
+        since the file would already be there.
+        """
+        path = self._local_path(entry)
+        if entry.path is not None:
+            return path.read_bytes()
+        mark = path.with_suffix(".stamp")
+        have = mark.read_text("utf-8").strip() if mark.exists() else ""
+        if not path.exists() or (entry.stamp and have != entry.stamp):
+            if self._download is None:
+                raise RuntimeError("파일을 받을 수 없습니다")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            self._download(entry.key, path)
+            if entry.stamp:
+                mark.write_text(entry.stamp, "utf-8")
+        return path.read_bytes()
+
+    def _fail(self, name: str, exc: object) -> None:
+        """Report a file we could not read, once, however often it is retried."""
+        line = f"{name}: {exc}"
+        if line not in self.errors:
+            self.errors.append(line)
 
     def _add(self, key: str, name: str, group: str, data: bytes) -> None:
         try:
             record = parse_dna(data, name)
         except ValueError as exc:
-            self.errors.append(f"{name}: {exc}")
+            self._fail(name, exc)
             return
         self.plasmids[key] = Plasmid(key, name, group, record)
 
     def groups(self) -> list[str]:
         seen = []
-        for p in self.plasmids.values():
-            if p.group and p.group not in seen:
-                seen.append(p.group)
+        for entry in self.entries.values():
+            if entry.group and entry.group not in seen:
+                seen.append(entry.group)
         return seen
 
-    def in_group(self, group: str) -> list[Plasmid]:
-        return sorted((p for p in self.plasmids.values() if p.group == group),
-                      key=lambda p: p.name.lower())
+    def in_group(self, group: str) -> list[PlasmidSummary]:
+        """The table's rows: summaries, not sequences."""
+        return sorted((s for s in self.summaries.values() if s.group == group),
+                      key=lambda s: s.name.lower())
 
     # ---- stock ------------------------------------------------------------
     def read_oligos(self, project) -> None:
@@ -255,19 +315,141 @@ class SequenceLibrary:
         if full_length:
             self.full_length = int(full_length)
 
+    def enzyme_stamp(self) -> str:
+        return stamp_of(sorted(f"{k}|{e.notation}" for k, e in self.enzymes.items()))
+
+    def oligo_stamp(self) -> str:
+        return stamp_of(sorted(f"{k}|{o.seq}" for k, o in self.oligos.items())
+                        + [self.min_match, self.full_length, self.min_tm])
+
+    def pending(self) -> list[FileEntry]:
+        """The maps whose summary has to be built or built again."""
+        enz, olig = self.enzyme_stamp(), self.oligo_stamp()
+        out = []
+        for entry in self.entries.values():
+            known = self.cache.get(entry.key)
+            if known is None or not known.fresh(entry.stamp, enz, olig):
+                out.append(entry)
+        return out
+
+    def index(self, progress=None) -> int:
+        """Bring every summary up to date, reading only the maps that need it.
+
+        `progress(done, total, name)` is called before each file so a caller can
+        show how far along it is. Returns how many maps were read.
+        """
+        enz, olig = self.enzyme_stamp(), self.oligo_stamp()
+        todo = self.pending()
+        total = len(todo)
+        for done, entry in enumerate(todo, 1):
+            if progress is not None:
+                progress(done, total, entry.name)
+            record = self._record_of(entry)
+            if record is None:
+                continue
+            self.cache.put(self._summarize(entry, record, enz, olig))
+        self.cache.keep_only(self.entries)
+        if total or self.cache.entries:
+            self.cache.save()
+        self.summaries = {k: s for k, s in self.cache.entries.items() if k in self.entries}
+        return total
+
+    def _record_of(self, entry: FileEntry) -> DnaRecord | None:
+        plasmid = self.plasmids.get(entry.key)
+        if plasmid is not None:
+            return plasmid.record
+        try:
+            return parse_dna(self._bytes(entry), entry.name)
+        except Exception as exc:  # noqa: BLE001  one bad file must not lose the rest
+            self._fail(entry.name, exc)
+            return None
+
+    def _summarize(self, entry: FileEntry, record: DnaRecord,
+                   enz: str, olig: str) -> PlasmidSummary:
+        cutting = {stock.display: len(find_cuts(record.seq, stock.site, record.circular, key))
+                   for key, stock in self.enzymes.items() if stock.site is not None}
+        hits = match_all(self.oligos.values(), {entry.key: record}, min_match=self.min_match,
+                         full_length=self.full_length, min_tm=self.min_tm)
+        anneal = arm = 0
+        names: list[str] = []
+        for name, found in hits.items():
+            for hit in found:
+                names.append(name)
+                if hit.anneals:
+                    anneal += 1
+                else:
+                    arm += 1
+        return PlasmidSummary(entry.key, entry.name, entry.group, entry.stamp,
+                              len(record.seq), record.circular, len(record.features),
+                              cutting, anneal, arm, sorted(set(names)), enz, olig)
+
+    # ---- opening one map --------------------------------------------------
+    def open(self, key: str) -> Plasmid | None:
+        """Read one map in full: its sequence, its cut sites and the oligos on it.
+
+        Only this is expensive, and only this many maps are kept: the table
+        itself never needs a sequence.
+        """
+        plasmid = self.plasmids.get(key)
+        if plasmid is None:
+            entry = self.entries.get(key)
+            if entry is None:
+                return None
+            try:
+                record = parse_dna(self._bytes(entry), entry.name)
+            except Exception as exc:  # noqa: BLE001
+                self._fail(entry.name, exc)
+                return None
+            plasmid = Plasmid(key, entry.name, entry.group, record)
+            self.plasmids[key] = plasmid
+            self._cut_one(plasmid)
+            self._match_one(plasmid)
+        if key in self._open_order:
+            self._open_order.remove(key)
+        self._open_order.append(key)
+        self._evict()
+        return plasmid
+
+    def _evict(self) -> None:
+        """Let go of maps the user has moved on from, keeping their summaries."""
+        while len(self._open_order) > MAX_OPEN:
+            gone = self._open_order.pop(0)
+            if self.entries.get(gone) is None or self.entries[gone].path is not None:
+                continue            # a local folder keeps everything anyway
+            self.plasmids.pop(gone, None)
+            self.by_plasmid.pop(gone, None)
+            for name in list(self.hits):
+                self.hits[name] = [h for h in self.hits[name] if h.plasmid != gone]
+
     def reindex(self) -> None:
         self._cut_all()
         self._match_all()
+        self.index()
+
+    def _cut_one(self, plasmid: Plasmid) -> None:
+        cuts: dict[str, list[EnzymeHit]] = {}
+        for key, stock in self.enzymes.items():
+            if stock.site is None:
+                continue
+            cuts[key] = find_cuts(plasmid.record.seq, stock.site,
+                                  plasmid.record.circular, key)
+        plasmid.cuts = cuts
+
+    def _match_one(self, plasmid: Plasmid) -> None:
+        found = match_all(self.oligos.values(), {plasmid.key: plasmid.record},
+                          min_match=self.min_match, full_length=self.full_length,
+                          min_tm=self.min_tm)
+        here: list[OligoHit] = []
+        for name, hits in found.items():
+            self.hits.setdefault(name, [])
+            self.hits[name] = [h for h in self.hits[name] if h.plasmid != plasmid.key] + hits
+            here += hits
+        here.sort(key=lambda h: (h.start, h.oligo))
+        self.by_plasmid[plasmid.key] = here
 
     def _cut_all(self) -> None:
         for plasmid in self.plasmids.values():
-            cuts: dict[str, list[EnzymeHit]] = {}
-            for key, stock in self.enzymes.items():
-                if stock.site is None:
-                    continue
-                cuts[key] = find_cuts(plasmid.record.seq, stock.site,
-                                      plasmid.record.circular, key)
-            plasmid.cuts = cuts
+            self._cut_one(plasmid)
 
     def _match_all(self) -> None:
         records = {key: p.record for key, p in self.plasmids.items()}
