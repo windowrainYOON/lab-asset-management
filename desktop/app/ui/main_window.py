@@ -687,7 +687,12 @@ class MainWindow(QMainWindow):
                            min_tm=prefs.get("sequence_min_tm"),
                            full_length=prefs.get("sequence_full_length"))
 
-        def work():
+        def listing():
+            """Which maps the folder holds, and the stock to index them against.
+
+            No .dna file is read here: a folder of hundreds would take a minute
+            to fetch, and the table only needs the stored index.
+            """
             client = getattr(self.session, "client", None)
             root = self._sequence_root()
             if client is not None and root:
@@ -702,15 +707,22 @@ class MainWindow(QMainWindow):
                     library.load_folder(folder)
             library.read_oligos(self.project)
             library.read_enzymes(self.project)
-            library.reindex()
 
-        try:
-            cloud_ui.run_blocking(self, work, "Sequence Map을 읽는 중…")
-        except Exception:  # noqa: BLE001  a folder we cannot reach must not block the tab
+        def run(step, message: str) -> None:
             try:
-                work()
-            except Exception:  # noqa: BLE001
-                library.errors.append("Sequence Map 폴더를 읽지 못했습니다.")
+                cloud_ui.run_blocking(self, step, message)
+            except Exception:  # noqa: BLE001  a folder we cannot reach must not block the tab
+                try:
+                    step()
+                except Exception:  # noqa: BLE001
+                    library.errors.append("Sequence Map 폴더를 읽지 못했습니다.")
+
+        run(listing, "Sequence Map 목록을 읽는 중…")
+        # Only the maps whose stored summary is missing or out of date are read,
+        # so this is a one-off the first time and after a map or the stock changes.
+        waiting = len(library.pending())
+        if waiting:
+            run(library.index, f"플라스미드 {waiting}개를 색인하는 중… (처음 한 번)")
         return library
 
     def _sequence_root(self) -> str:

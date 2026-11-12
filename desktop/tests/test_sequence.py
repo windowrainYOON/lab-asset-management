@@ -66,14 +66,21 @@ def _dna_file(seq: str, circular: bool = True) -> bytes:
             + _block(10, features.encode()))
 
 
-@pytest.fixture()
-def plasmid_bytes() -> bytes:
+def _fixture_seq() -> str:
     seq = _clean(_random_seq(LENGTH))
     seq = _plant(seq, XHOI_AT, "CTCGAG")
     seq = _plant(seq, NDEI_AT, "CATATG")
     seq = _plant(seq, ECORV_AT, "GATATC")
     assert len(seq) == LENGTH
-    return _dna_file(seq)
+    return seq
+
+
+_PLASMID_SEQ = _fixture_seq()
+
+
+@pytest.fixture()
+def plasmid_bytes() -> bytes:
+    return _dna_file(_PLASMID_SEQ)
 
 
 # ---- the .dna format ------------------------------------------------------
@@ -345,3 +352,177 @@ def test_an_empty_group_says_so_instead_of_failing(tmp_path):
     inspector = SequenceInspector()
     inspector.show_plasmid(SequenceLibrary(), None)
     assert "플라스미드 없음" in _texts(inspector)
+
+
+# ---- the stored index -----------------------------------------------------
+class _Remote:
+    """One .dna file in a pretend Drive folder."""
+
+    def __init__(self, key: str, name: str, group: str, version: str):
+        self.id = key
+        self.name = name
+        self.folder = group
+        self.version = version
+        self.modified_time = ""
+
+
+def _stocked(lib):
+    from app.core.sequence.library import EnzymeStock
+    lib.enzymes = {name: EnzymeStock(name, cut_site_for(name)) for name in ("XhoI", "NdeI", "BamHI")}
+    lib.oligos = {"fwd": Oligo("fwd", _PLASMID_SEQ[1190:1212], order="OL1")}
+
+
+def _remote_library(tmp_path, plasmid_bytes, version="v1"):
+    """A library over a fake folder, counting how often a file is fetched."""
+    calls: list[str] = []
+
+    def download(file_id, dest):
+        calls.append(file_id)
+        dest.write_bytes(plasmid_bytes)
+
+    lib = SequenceLibrary(cache_dir=tmp_path / "cache")
+    files = [_Remote("id-1", "pFixture.dna", "Common Plasmid", version)]
+    lib.load_entries(files, download)
+    _stocked(lib)
+    return lib, calls, download, files
+
+
+def test_listing_a_folder_downloads_nothing_until_it_is_indexed(tmp_path, plasmid_bytes):
+    lib, calls, _, _ = _remote_library(tmp_path, plasmid_bytes)
+    assert calls == []
+    assert lib.plasmids == {}
+    assert [e.name for e in lib.entries.values()] == ["pFixture"]
+    assert len(lib.pending()) == 1
+
+    assert lib.index() == 1
+    assert calls == ["id-1"]
+    summary = lib.summaries["id-1"]
+    assert summary.length == LENGTH and summary.features
+    assert summary.singles == ["NdeI", "XhoI"]
+    assert summary.cutters == 2
+    assert summary.anneal == 1
+    assert lib.plasmids == {}          # the table never holds a sequence
+
+
+def test_a_second_launch_reads_the_index_and_no_files(tmp_path, plasmid_bytes):
+    lib, calls, download, files = _remote_library(tmp_path, plasmid_bytes)
+    lib.index()
+    assert len(calls) == 1
+
+    again = SequenceLibrary(cache_dir=tmp_path / "cache")
+    again.load_entries(files, download)
+    _stocked(again)
+    assert again.pending() == []
+    assert again.index() == 0
+    assert len(calls) == 1
+    assert again.summaries["id-1"].singles == ["NdeI", "XhoI"]
+
+
+def test_a_map_edited_in_snapgene_is_read_again(tmp_path, plasmid_bytes):
+    lib, calls, download, _ = _remote_library(tmp_path, plasmid_bytes)
+    lib.index()
+
+    newer = SequenceLibrary(cache_dir=tmp_path / "cache")
+    newer.load_entries([_Remote("id-1", "pFixture.dna", "Common Plasmid", "v2")], download)
+    _stocked(newer)
+    assert len(newer.pending()) == 1   # the revision moved, so the copy is stale
+    newer.index()
+    assert calls == ["id-1", "id-1"]
+
+
+def test_changing_the_stock_makes_the_index_stale(tmp_path, plasmid_bytes):
+    from app.core.sequence.library import EnzymeStock
+    lib, _, _, _ = _remote_library(tmp_path, plasmid_bytes)
+    lib.index()
+    assert lib.pending() == []
+
+    lib.enzymes["EcoRV"] = EnzymeStock("EcoRV", cut_site_for("EcoRV"))
+    assert len(lib.pending()) == 1
+    lib.index()
+    assert "EcoRV" in lib.summaries["id-1"].cutting
+
+    lib.set_limits(min_match=25)
+    assert len(lib.pending()) == 1     # the thresholds are part of the stamp
+
+
+def test_opening_a_map_is_what_reads_its_sequence(tmp_path, plasmid_bytes):
+    lib, calls, _, _ = _remote_library(tmp_path, plasmid_bytes)
+    lib.index()
+    assert lib.plasmids == {}
+
+    plasmid = lib.open("id-1")
+    assert plasmid is not None
+    assert plasmid.length == LENGTH
+    assert plasmid.unique_cutters() == ["NdeI", "XhoI"]
+    assert [h.oligo for h in lib.plasmid_hits("id-1")] == ["fwd"]
+    assert calls == ["id-1"]           # the copy from indexing was reused
+
+    assert lib.open("id-1") is plasmid
+
+
+def test_only_the_last_few_maps_opened_are_kept(tmp_path, plasmid_bytes):
+    from app.core.sequence.library import MAX_OPEN
+
+    def download(file_id, dest):
+        dest.write_bytes(plasmid_bytes)
+
+    lib = SequenceLibrary(cache_dir=tmp_path / "cache")
+    keys = [f"id-{n}" for n in range(MAX_OPEN + 2)]
+    lib.load_entries([_Remote(k, f"p{k}.dna", "Common Plasmid", "v1") for k in keys], download)
+    _stocked(lib)
+    for key in keys:
+        lib.open(key)
+    assert len(lib.plasmids) == MAX_OPEN
+    assert keys[0] not in lib.plasmids
+    assert keys[-1] in lib.plasmids
+    assert len(lib.summaries) == 0 or set(lib.summaries) <= set(keys)
+
+
+def test_a_row_can_be_searched_by_enzyme_or_oligo(tmp_path, plasmid_bytes):
+    lib, _, _, _ = _remote_library(tmp_path, plasmid_bytes)
+    lib.index()
+    summary = lib.summaries["id-1"]
+    assert summary.matches("")
+    assert summary.matches("pFix")
+    assert summary.matches("ndei")      # an enzyme that cuts it
+    assert summary.matches("fwd")       # an oligo that binds it
+    assert not summary.matches("pUC19")
+
+
+def test_the_table_lists_every_map_and_opening_one_reads_it(tmp_path, plasmid_bytes):
+    _qt_app()
+    from app.ui.sequence_view import SequenceView
+
+    def download(file_id, dest):
+        dest.write_bytes(plasmid_bytes)
+
+    lib = SequenceLibrary(cache_dir=tmp_path / "cache")
+    lib.load_entries([_Remote("id-1", "pFixture.dna", "Common Plasmid", "v1"),
+                      _Remote("id-2", "pOther.dna", "Common Plasmid", "v1"),
+                      _Remote("id-3", "pMine.dna", "Personal Plasmid", "v1")], download)
+    _stocked(lib)
+    lib.index()
+
+    view = SequenceView(object(), "Common Plasmid")
+    view.set_library(lib)
+    assert view.pages.currentIndex() == 0            # the list comes first
+    assert view.table.rowCount() == 2                # the other group is not here
+    assert view.table.item(0, 0).text() == "pFixture"
+    assert "NdeI" in view.table.item(0, 5).text()
+    assert lib.plasmids == {}                        # still no sequence read
+
+    view.search.setText("pOther")
+    assert view.table.rowCount() == 1
+    view.search.setText("")
+    view._set_filter("single")
+    assert view.table.rowCount() == 2                # both have unique cutters
+    view._set_filter("all")
+
+    view.table.selectRow(0)
+    view._open_selected()
+    assert view.pages.currentIndex() == 1
+    assert view.plasmid is not None and view.plasmid.name == "pFixture"
+    assert "bp" in view.map_sub.text()
+
+    view.show_list()
+    assert view.pages.currentIndex() == 0
