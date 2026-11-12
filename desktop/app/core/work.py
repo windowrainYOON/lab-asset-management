@@ -1,6 +1,8 @@
 """Work (업무): projects with people in charge, kept in one Excel file in the Drive folder.
 
-Two kinds of project:
+Three kinds of project:
+- owner (담당): no dates, only the people in charge and a memo. Not on the schedule or the
+  dashboard's duty box; people send it 업무 요청 (requests) instead.
 - milestone (마일스톤): named steps, each with a date and one person in charge.
 - rotation (당번제): a duty that comes back on a schedule (매일, 평일, 격일, 매주, 격주, 매달);
   the people take turns in the project's order, one or more at a time (회차 인원: two
@@ -13,7 +15,14 @@ after it. Marking the current one done moves the highlight on.
 The file (업무.xlsx) is an ordinary workbook people can also open in Excel:
   프로젝트: ID | 이름 | 종류 | 담당자 | 주기 | 시작일 | 개수 | 업무 이름 | 메모 | 회차 인원
   업무:     ID | 프로젝트 ID | 프로젝트 | 날짜 | 담당자 (several: comma separated) | 업무 | 완료 | 완료 시각
+  요청:     ID | 날짜 | 업무 ID | 업무 | 보낸 사람 | 받는 사람 | 내용 | 상태 | 확인한 사람 | 확인 시각 | 메일
 It is not shown as an inventory category.
+
+업무 요청: a short memo (no title) to the people of one 업무 (an owner duty's people, or the
+current turn of a rotation / milestone). The mobile web app writes the same 요청 tab. A row whose
+메일 cell is empty is mailed by the web app's server (time trigger, every 5 minutes), so requests
+sent here reach people by mail without any app staying open. Tabs this module does not own are
+kept as they are when the file is written.
 """
 from __future__ import annotations
 
@@ -28,11 +37,13 @@ from pathlib import Path
 from .importer import clean_text
 
 WORK_NAME = "업무.xlsx"
-KINDS = {"rotation": "당번제", "milestone": "마일스톤"}
+KINDS = {"rotation": "당번제", "milestone": "마일스톤", "owner": "담당"}
 FREQS = {"daily": "매일", "weekdays": "평일마다", "alternate": "격일", "weekly": "매주",
          "biweekly": "격주", "monthly": "매달"}
 PROJECT_HEADERS = ["ID", "이름", "종류", "담당자", "주기", "시작일", "기간", "업무 이름", "메모", "회차 인원"]
 TASK_HEADERS = ["ID", "프로젝트 ID", "프로젝트", "날짜", "담당자", "업무", "완료", "완료 시각"]
+REQUEST_HEADERS = ["ID", "날짜", "업무 ID", "업무", "보낸 사람", "받는 사람", "내용", "상태", "확인한 사람", "확인 시각", "메일"]
+OWN_TABS = ("프로젝트", "업무", "요청")
 HALVES = {1: "상반기", 2: "하반기"}
 TRUE = ("o", "y", "yes", "true", "1", "완료", "✓", "✔")
 
@@ -74,6 +85,26 @@ class WorkProject:
     def period_label(self) -> str:
         y, h = self.until_half
         return half_label(y, h)
+
+
+@dataclass
+class WorkRequest:
+    """One 업무 요청: a memo to the people of one 업무. state "보냄" until a receiver presses 확인."""
+    id: str = field(default_factory=_id)
+    date: str = ""  # "YYYY-MM-DD HH:MM"
+    work_id: str = ""
+    work: str = ""
+    sender: str = ""
+    to: list[str] = field(default_factory=list)
+    memo: str = ""
+    state: str = "보냄"
+    ack_by: str = ""
+    ack_at: str = ""
+    mailed: str = ""
+
+    @property
+    def acked(self) -> bool:
+        return self.state == "확인함"
 
 
 @dataclass
@@ -293,6 +324,65 @@ def reorder(members: list[str], name: str, index: int) -> list[str]:
 
 
 # ---- the workbook -------------------------------------------------------------------
+def _names(text: str) -> list[str]:
+    return [m.strip() for m in str(text or "").replace("\n", ",").split(",") if m.strip()]
+
+
+def read_requests(path: Path) -> list[WorkRequest]:
+    from openpyxl import load_workbook
+
+    wb = load_workbook(path, read_only=True, data_only=True)
+    try:
+        if "요청" not in wb.sheetnames:
+            return []
+        rs = [[clean_text(c) for c in r] for r in wb["요청"].iter_rows(values_only=True)]
+    finally:
+        wb.close()
+    if not rs:
+        return []
+    col = {h.strip(): i for i, h in enumerate(rs[0])}
+
+    def get(r, h):
+        i = col.get(h)
+        return r[i].strip() if i is not None and i < len(r) else ""
+
+    out = [WorkRequest(id=get(r, "ID"), date=get(r, "날짜"), work_id=get(r, "업무 ID"), work=get(r, "업무"),
+                       sender=get(r, "보낸 사람"), to=_names(get(r, "받는 사람")), memo=get(r, "내용"),
+                       state=get(r, "상태") or "보냄", ack_by=get(r, "확인한 사람"), ack_at=get(r, "확인 시각"),
+                       mailed=get(r, "메일"))
+           for r in rs[1:] if any(r)]
+    return [x for x in out if x.id]
+
+
+def _other_tabs(path: Path) -> list[tuple[str, list[list]]]:
+    """Tabs of the file this module does not own (kept when the file is written again)."""
+    if not Path(path).exists():
+        return []
+    from openpyxl import load_workbook
+    try:
+        wb = load_workbook(path, read_only=True, data_only=False)
+    except Exception:  # noqa: BLE001  not a workbook yet
+        return []
+    try:
+        return [(n, [list(r) for r in wb[n].iter_rows(values_only=True)]) for n in wb.sheetnames if n not in OWN_TABS]
+    finally:
+        wb.close()
+
+
+def request_targets(projects: list[WorkProject], tasks: list[WorkTask]) -> list[tuple[WorkProject, list[str]]]:
+    """Who gets a request for each 업무: an owner duty's people; otherwise this turn's people
+    (else everyone on it). Owner duties first."""
+    out = []
+    for p in projects:
+        people = list(p.members)
+        if p.kind != "owner":
+            cur, _ = current_next(tasks, p.id)
+            if cur is not None and cur.people:
+                people = list(cur.people)
+        out.append((p, people))
+    return sorted(out, key=lambda x: 0 if x[0].kind == "owner" else 1)
+
+
 def read_work(path: Path) -> tuple[list[WorkProject], list[WorkTask]]:
     from openpyxl import load_workbook
 
@@ -327,7 +417,7 @@ def read_work(path: Path) -> tuple[list[WorkProject], list[WorkTask]]:
         freq = get(r, pc, "주기")
         projects.append(WorkProject(
             id=get(r, pc, "ID") or _id(), name=get(r, pc, "이름"), kind=kinds.get(kind, kind or "rotation"),
-            members=[m.strip() for m in get(r, pc, "담당자").replace("\n", ",").split(",") if m.strip()],
+            members=_names(get(r, pc, "담당자")),
             freq=freqs.get(freq, freq or "weekly"), start=get(r, pc, "시작일")[:10] or date.today().isoformat(),
             until=format_half(*until) if until else "", task_title=get(r, pc, "업무 이름"), note=get(r, pc, "메모"), per_turn=per_turn))
     tasks = [WorkTask(id=get(r, tc, "ID") or _id(), project_id=get(r, tc, "프로젝트 ID"), date=get(r, tc, "날짜")[:10],
@@ -337,10 +427,18 @@ def read_work(path: Path) -> tuple[list[WorkProject], list[WorkTask]]:
     return projects, tasks
 
 
-def write_work(path: Path, projects: list[WorkProject], tasks: list[WorkTask]) -> None:
+def write_work(path: Path, projects: list[WorkProject], tasks: list[WorkTask],
+               requests: list[WorkRequest] | None = None) -> None:
+    """Write the file. `requests` None = keep the 요청 tab that is there; other tabs are always kept."""
     from openpyxl import Workbook
     from openpyxl.styles import Font
 
+    keep = _other_tabs(path)
+    if requests is None and Path(path).exists():
+        try:
+            requests = read_requests(path)
+        except Exception:  # noqa: BLE001
+            requests = []
     wb = Workbook()
     ws = wb.active
     ws.title = "프로젝트"
@@ -356,7 +454,19 @@ def write_work(path: Path, projects: list[WorkProject], tasks: list[WorkTask]) -
     for t in sorted(tasks, key=lambda t: (names.get(t.project_id, ""), t.date)):
         wt.append([t.id, t.project_id, names.get(t.project_id, ""), t.date, t.assignee, t.title,
                    "완료" if t.done else "", t.done_at])
-    for sheet, widths in ((ws, (10, 24, 10, 36, 10, 12, 6, 16, 30, 9)), (wt, (10, 10, 24, 12, 12, 24, 6, 17))):
+    sheets = [(ws, (10, 24, 10, 36, 10, 12, 6, 16, 30, 9)), (wt, (10, 10, 24, 12, 12, 24, 6, 17))]
+    if requests:
+        wr = wb.create_sheet("요청")
+        wr.append(REQUEST_HEADERS)
+        for q in requests:
+            wr.append([q.id, q.date, q.work_id, q.work, q.sender, ", ".join(q.to), q.memo, q.state,
+                       q.ack_by, q.ack_at, q.mailed])
+        sheets.append((wr, (10, 17, 10, 20, 10, 18, 50, 8, 10, 17, 17)))
+    for name, rows in keep:
+        other = wb.create_sheet(name)
+        for r in rows:
+            other.append(r)
+    for sheet, widths in sheets:
         for c in sheet[1]:
             c.font = Font(bold=True)
         for i, w in enumerate(widths):
@@ -375,7 +485,9 @@ class WorkBoard:
         self.local = Path(local) if local else None
         path = self.local or Path(cache_dir) / "work.xlsx"
         self.file = SyncedFile(remote, path, file_id, WORK_NAME,
-                               lambda p: read_work(p), lambda p, st: write_work(p, *st), lambda: ([], []))
+                               lambda p: read_work(p) + (read_requests(p),),
+                               lambda p, st: write_work(p, st[0], st[1], list(st[2]) if len(st) > 2 else None),
+                               lambda: ([], [], []))
 
     remote = property(lambda self: self.file.remote)
     file_id = property(lambda self: self.file.file_id)
@@ -387,7 +499,7 @@ class WorkBoard:
 
     @projects.setter
     def projects(self, value) -> None:
-        self.file.state = (list(value), self.file.state[1])
+        self.file.state = (list(value), self.file.state[1], self.requests)
 
     @property
     def tasks(self) -> list[WorkTask]:
@@ -395,10 +507,16 @@ class WorkBoard:
 
     @tasks.setter
     def tasks(self, value) -> None:
-        self.file.state = (self.file.state[0], list(value))
+        self.file.state = (self.file.state[0], list(value), self.requests)
+
+    @property
+    def requests(self) -> list[WorkRequest]:
+        st = self.file.state
+        return list(st[2]) if len(st) > 2 else []
 
     def load(self) -> tuple[list[WorkProject], list[WorkTask]]:
-        return self.file.load()
+        st = self.file.load()
+        return st[0], st[1]
 
     def sync(self) -> bool:
         return self.file.sync()
@@ -408,7 +526,32 @@ class WorkBoard:
 
     def save(self, change) -> None:
         """`change(projects, tasks) -> (projects, tasks)`; shows at once, sent with the next sync."""
-        self.file.edit(lambda st: tuple(change(list(st[0]), list(st[1]))))
+        self.file.edit(lambda st: tuple(change(list(st[0]), list(st[1]))) + (list(st[2]) if len(st) > 2 else [],))
+
+    def save_requests(self, change) -> None:
+        """`change(requests) -> requests`; projects and tasks stay as they are."""
+        self.file.edit(lambda st: (list(st[0]), list(st[1]), list(change(list(st[2]) if len(st) > 2 else []))))
+
+    def send_request(self, sender: str, work_id: str, memo: str, when: datetime | None = None) -> WorkRequest:
+        """A new 업무 요청 to that 업무's people (mailed later by the web app's server)."""
+        memo = memo.strip()
+        if not memo:
+            raise ValueError("요청 내용을 적어 주세요.")
+        hit = next(((p, ppl) for p, ppl in request_targets(self.projects, self.tasks) if p.id == work_id), None)
+        if hit is None:
+            raise ValueError("업무를 골라 주세요.")
+        p, people = hit
+        if not people:
+            raise ValueError("이 업무에는 담당자가 없어요. 먼저 담당자를 정해 주세요.")
+        req = WorkRequest(date=(when or datetime.now()).strftime("%Y-%m-%d %H:%M"), work_id=p.id, work=p.name,
+                          sender=sender, to=people, memo=memo[:4000])
+        self.save_requests(lambda rs: rs + [req])
+        return req
+
+    def ack_request(self, rid: str, who: str, when: datetime | None = None) -> None:
+        stamp = (when or datetime.now()).strftime("%Y-%m-%d %H:%M")
+        self.save_requests(lambda rs: [replace(r, state="확인함", ack_by=who, ack_at=stamp)
+                                       if r.id == rid and not r.acked else r for r in rs])
 
     def replace_all(self, projects: list[WorkProject], tasks: list[WorkTask]) -> None:
         """Write this exact state (undo)."""

@@ -1,5 +1,5 @@
 """Work tab: rotation filling, re-sorting, deleting from a date, the current/next task."""
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 from app.core import work as w
 
@@ -143,3 +143,89 @@ def test_rotation_period_by_year_and_half(tmp_path):
     w.write_work(path, [p], tasks)
     ps, _ = w.read_work(path)
     assert ps[0].until_half == (2027, 1)
+
+
+def test_owner_duty_and_requests_round_trip(tmp_path):
+    from openpyxl import load_workbook
+    path = tmp_path / "업무.xlsx"
+    rot = _proj()
+    own = w.WorkProject(name="액체질소 관리", kind="owner", members=["김민준", "정하늘"], note="금요일 충전")
+    tasks = w.fill_rotation(rot, [], "B", date(2026, 11, 2), count=2)
+    board = w.WorkBoard(None, tmp_path, local=path)
+    board.save(lambda _p, _t: ([rot, own], tasks))
+    # a tab another app added (e.g. something new on the web) is kept when the desktop writes
+    wb = load_workbook(path)
+    wb.create_sheet("메모").append(["x", "y"])
+    wb.save(path)
+    targets = dict((p.id, ppl) for p, ppl in w.request_targets([rot, own], tasks))
+    assert targets[own.id] == ["김민준", "정하늘"] and targets[rot.id] == ["B"]
+    assert [p.kind for p, _ in w.request_targets([rot, own], tasks)] == ["owner", "rotation"]
+    board = w.WorkBoard(None, tmp_path, local=path)
+    board.load()
+    req = board.send_request("A", own.id, "  내일 문 열어 주세요  ", when=datetime(2026, 11, 12, 9, 30))
+    assert (req.to, req.memo, req.date, req.mailed) == (["김민준", "정하늘"], "내일 문 열어 주세요", "2026-11-12 09:30", "")
+    for bad, msg in (("", "내용"), ("x", None)):
+        try:
+            board.send_request("A", own.id if not bad else "nope", bad and "hi")
+            raise AssertionError("expected ValueError")
+        except ValueError:
+            pass
+    board.ack_request(req.id, "정하늘", when=datetime(2026, 11, 12, 10, 0))
+    # editing 업무 afterwards keeps the requests and the other tab
+    board.save(lambda p, t: (p, t))
+    again = w.read_requests(path)
+    assert len(again) == 1 and again[0].acked and (again[0].ack_by, again[0].ack_at) == ("정하늘", "2026-11-12 10:00")
+    projects, _ = w.read_work(path)
+    o = next(p for p in projects if p.kind == "owner")
+    assert (o.name, o.members, o.note, o.kind_label) == ("액체질소 관리", ["김민준", "정하늘"], "금요일 충전", "담당")
+    assert "메모" in load_workbook(path).sheetnames
+    # an old file without a 요청 tab reads as no requests
+    w.write_work(tmp_path / "old.xlsx", [rot], tasks, [])
+    assert w.read_requests(tmp_path / "old.xlsx") == []
+
+
+def test_requests_page(tmp_path, monkeypatch):
+    import os
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+    from app.core import settings
+    from app.core.project import Project
+    app = QApplication.instance() or QApplication([])
+    monkeypatch.setattr(settings, "_settings_path", lambda: tmp_path / "settings.json")
+    monkeypatch.setattr(settings, "user_data_dir", lambda: tmp_path)
+    monkeypatch.setattr(settings, "remember_project", lambda *_: None)
+    s = settings.load_settings()
+    s["requester_name"] = "정하늘"
+    settings.save_settings(s)
+    from app.ui.main_window import MainWindow
+    proj = Project.create(tmp_path / "t.labproj", "t")
+    win = MainWindow(proj)
+    ctrl = win.work
+    own = w.WorkProject(name="액체질소 관리", kind="owner", members=["김민준", "정하늘"])
+    ctrl.upsert_project(own)
+    # the 업무 page shows the owner duty without the month calendar; its button opens 업무 요청
+    win.show_work(own.id)
+    assert win.work_page.owner_box.isVisibleTo(win.work_page) and not win.work_page.month.isVisibleTo(win.work_page)
+    assert own.id not in [p.id for p in win.dashboard.work_section.ctrl.projects() if p.kind != "owner"]
+    win.work_page.ask_btn.click()
+    page = win.requests_page
+    assert win.stack.currentWidget() is page and page.compose.work.currentData() == own.id
+    assert page.compose.to.text() == "김민준, 정하늘"
+    page.compose.memo.setPlainText("CO₂ 봄베 교체 부탁해요")
+    assert page.compose.send.isEnabled()
+    page.compose.send.click()
+    app.processEvents()
+    assert page.compose.memo.toPlainText() == "" and page.table.rowCount() == 1
+    assert [page.table.item(0, c).text() for c in (1, 2, 3, 5)] == ["액체질소 관리", "CO₂ 봄베 교체 부탁해요", "정하늘", "확인 전"]
+    page.set_filter("to")
+    btn = page.table.cellWidget(0, 6)
+    assert btn is not None and btn.text() == "확인"
+    btn.click()
+    app.processEvents()
+    assert ctrl.requests()[0].acked and page.table.item(0, 5).text() == "확인함"
+    page.set_filter("from")
+    assert page.table.rowCount() == 1
+    win.open_tab("requests")
+    assert win.header_title.text() == "업무 요청"
+    win.close()
+    proj.close()

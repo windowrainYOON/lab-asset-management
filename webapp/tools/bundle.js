@@ -3,7 +3,7 @@
 const fs = require('fs');
 const path = require('path');
 const root = path.join(__dirname, '..');
-const ORDER = ['Util', 'Config', 'Table', 'Auth', 'Db', 'Sdm', 'Attendance', 'Reservations', 'Work', 'Notices', 'Orders', 'Budget', 'Schedule', 'Main'];
+const ORDER = ['Util', 'Config', 'Table', 'Auth', 'Db', 'Sdm', 'Attendance', 'Reservations', 'Work', 'Requests', 'Notices', 'Orders', 'Budget', 'Schedule', 'Main'];
 const have = fs.readdirSync(path.join(root, 'server')).filter(f => f.endsWith('.gs')).map(f => f.slice(0, -3));
 const missing = have.filter(f => !ORDER.includes(f));
 if (missing.length) throw new Error('add to ORDER: ' + missing.join(', '));

@@ -23,7 +23,7 @@ def test_sections_and_hidden_tabs(isolated):
     secs = nav_tabs.all_sections(p)
     assert [s.key for s in secs] == ["home", "common", "personal", "sequence"]
     assert [t.key for t in secs[-1].tabs] == ["seq:common", "seq:personal"]
-    assert [t.key for t in secs[0].tabs] == ["dash:common", "dash:personal", "schedule", "work",
+    assert [t.key for t in secs[0].tabs] == ["dash:common", "dash:personal", "schedule", "work", "requests",
                                               "reservations", "orders", "budget", "notices", "attendance"]
     assert nav_tabs.collapsed_sections() == {"hidden"}  # 숨긴 항목 starts folded
 
@@ -60,7 +60,7 @@ def test_sidebar_and_dashboards(isolated, monkeypatch):
             out.append((head.data(0, KEY_ROLE), [head.child(j).data(0, KEY_ROLE) for j in range(head.childCount())]))
         return out
 
-    assert rows() == [("home", ["dash:common", "dash:personal", "work", "reservations", "orders",
+    assert rows() == [("home", ["dash:common", "dash:personal", "work", "requests", "reservations", "orders",
                                 "budget", "notices", "attendance"]),
                       ("common", ["cat:common:Reagents", "cat:common:Antibody"]),
                       ("personal", ["cat:personal:김다은 개인 품목"]),

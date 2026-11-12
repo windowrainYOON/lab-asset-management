@@ -226,12 +226,15 @@ class MainWindow(QMainWindow):
         self.work_page = WorkPage(self.work)
         self.work_page.set_project(project)
         self.dashboard.work_section.open_project.connect(self.show_work)
+        from .requests_view import RequestsPage
+        self.requests_page = RequestsPage(self.work)
+        self.work_page.request_to.connect(self.show_requests)
         # the 일정 calendar shows the work tasks as its own calendar (업무), edits go back here
         self.schedule_page.work = self.work
         self.schedule_page.open_work.connect(self.show_work)
         self.work.changed.connect(self.schedule_page.work_changed)
         for page in (self.dashboard, self.personal_dashboard, self.category_page, self.search_page,
-                     self.schedule_page, self.notices_page, self.work_page, self.reservation_page,
+                     self.schedule_page, self.notices_page, self.work_page, self.requests_page, self.reservation_page,
                      self.orders_page, self.budget_page, self.attendance_page, *self.sequence_pages.values()):
             self.stack.addWidget(page)
         self.dashboard.reservation_card.open_tab.connect(self.show_reservations)
@@ -242,7 +245,7 @@ class MainWindow(QMainWindow):
         self.stack.currentChanged.connect(lambda _: self._update_header())
         # the pages' inspectors live in the inspector box beside the canvas box
         for page in (self.category_page, self.schedule_page, self.reservation_page, self.orders_page,
-                     self.budget_page, self.attendance_page, self.search_page):
+                     self.budget_page, self.attendance_page, self.search_page, self.requests_page):
             self.inspector_box.add(page, page.inspector_panel)
         for page in self.sequence_pages.values():
             self.inspector_box.add(page, page.inspector)
@@ -359,8 +362,8 @@ class MainWindow(QMainWindow):
         self.show_sidebar_btn.setVisible(not show)
 
     HEADER_ICONS = {"dash:common": "square.grid.2x2", "dash:personal": "person", "schedule": "calendar",
-                    "work": "checkmark.circle", "notices": "bell", "reservations": "clock",
-                    "orders": "shippingbox", "budget": "wonsign", "attendance": "alarm",
+                    "work": "checkmark.circle", "requests": "square.and.pencil", "notices": "bell",
+                    "reservations": "clock", "orders": "shippingbox", "budget": "wonsign", "attendance": "alarm",
                     "seq:common": "scissors", "seq:personal": "scissors"}
 
     def _update_header(self) -> None:
@@ -377,6 +380,8 @@ class MainWindow(QMainWindow):
             key, title = "notices", "공지사항"
         elif page is self.work_page:
             key, title = "work", "업무"
+        elif page is self.requests_page:
+            key, title = "requests", "업무 요청"
         elif page is self.reservation_page:
             key, title = "reservations", "장비 예약"
         elif page is self.orders_page:
@@ -488,6 +493,8 @@ class MainWindow(QMainWindow):
             self.show_notices()
         elif key == "work":
             self.show_work()
+        elif key == "requests":
+            self.show_requests()
         elif key == "reservations":
             self.show_reservations()
         elif key == "orders":
@@ -529,6 +536,14 @@ class MainWindow(QMainWindow):
         else:
             self.work_page.refresh()
         self.stack.setCurrentWidget(self.work_page)
+
+    def show_requests(self, work_id: str = "") -> None:
+        self.current_category = None
+        self.sidebar.set_nav("requests")
+        self.requests_page.refresh()
+        if work_id:
+            self.requests_page.choose(work_id)
+        self.stack.setCurrentWidget(self.requests_page)
 
     def show_reservations(self, equipment_id: str = "") -> None:
         self.current_category = None
@@ -1152,6 +1167,8 @@ class MainWindow(QMainWindow):
             self.show_notices()
         elif page is self.work_page:
             self.show_work(work_pid)
+        elif page is self.requests_page:
+            self.show_requests()
         elif page is self.reservation_page:
             self.show_reservations()
         elif page is self.orders_page:

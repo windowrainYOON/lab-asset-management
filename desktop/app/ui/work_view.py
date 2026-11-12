@@ -127,6 +127,37 @@ class WorkController(QObject):
         self.changed.emit()
         return True
 
+    # -- 업무 요청 (not undoable: once sent, it is sent) --
+    def requests(self) -> list[W.WorkRequest]:
+        return sorted(self.board.requests, key=lambda r: r.date, reverse=True) if self.board else []
+
+    def targets(self) -> list[tuple[W.WorkProject, list[str]]]:
+        return W.request_targets(self.projects(), self.tasks()) if self.board else []
+
+    def send_request(self, sender: str, work_id: str, memo: str) -> W.WorkRequest | None:
+        if self.board is None:
+            return None
+        try:
+            req = self.board.send_request(sender, work_id, memo)
+        except ValueError as exc:
+            QMessageBox.information(self.parent_widget, "업무 요청", str(exc))
+            return None
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self.parent_widget, "업무 요청", f"보내지 못했습니다.\n{exc}")
+            return None
+        self.changed.emit()
+        return req
+
+    def ack_request(self, rid: str, who: str) -> None:
+        if self.board is None:
+            return
+        try:
+            self.board.ack_request(rid, who)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self.parent_widget, "업무 요청", f"저장하지 못했습니다.\n{exc}")
+            return
+        self.changed.emit()
+
     def undo(self) -> None:
         if not self.undo_stack or self.board is None:
             return
@@ -742,22 +773,26 @@ class ProjectDialog(QDialog):
         super().__init__(parent)
         self.project = project
         self.kind = project.kind if project else kind
-        self.setWindowTitle(("프로젝트 설정" if project else f"새 {W.KINDS[self.kind]} 프로젝트"))
+        self.setWindowTitle(("프로젝트 설정" if project else "새 담당 업무" if self.kind == "owner" else f"새 {W.KINDS[self.kind]} 프로젝트"))
         self.setMinimumWidth(tokens.space("inspector-width") * 2)
         lay = QVBoxLayout(self)
         lay.setSpacing(tokens.space("gap-group"))
         g = InsetGroup()
         self.name = QLineEdit(project.name if project else "")
-        self.name.setPlaceholderText("예: 실험실 청소" if self.kind == "rotation" else "예: 논문 투고")
+        self.name.setPlaceholderText({"rotation": "예: 실험실 청소", "owner": "예: 액체질소 관리"}.get(self.kind, "예: 논문 투고"))
         g.add_row("이름", self.name, expand=True)
         self.duty = QLineEdit(project.task_title if project else "")
         self.duty.setPlaceholderText("비우면 프로젝트 이름")
         if self.kind == "rotation":
             g.add_row("업무 이름", self.duty, expand=True)
-        lay.addWidget(inset_title(f"{W.KINDS[self.kind]} 프로젝트"))
+        self.note = QLineEdit(project.note if project else "")
+        self.note.setPlaceholderText("예: 매주 금요일 오전 충전 업체 방문")
+        if self.kind == "owner":
+            g.add_row("메모", self.note, expand=True)
+        lay.addWidget(inset_title("담당 업무" if self.kind == "owner" else f"{W.KINDS[self.kind]} 프로젝트"))
         lay.addWidget(g)
 
-        lay.addWidget(inset_title("담당자 (체크한 순서가 처음 순번)"))
+        lay.addWidget(inset_title("담당자" if self.kind == "owner" else "담당자 (체크한 순서가 처음 순번)"))
         self.people = QListWidget()
         self.people.setMinimumHeight(5 * tokens.space("row"))
         chosen = list(project.members) if project else []
@@ -813,6 +848,8 @@ class ProjectDialog(QDialog):
         base.name = self.name.text().strip()
         base.task_title = self.duty.text().strip()
         base.members = list(self.order)
+        if base.kind == "owner":
+            base.note = self.note.text().strip()
         return base
 
 
@@ -844,6 +881,8 @@ class MilestoneDialog(QDialog):
 
 # ---- the Work tab ------------------------------------------------------------------------
 class WorkPage(QWidget):
+    request_to = Signal(str)  # open 업무 요청 with this 업무 chosen
+
     def __init__(self, ctrl: WorkController, parent=None):
         super().__init__(parent)
         self.ctrl = ctrl
@@ -869,6 +908,7 @@ class WorkPage(QWidget):
         new_menu = QMenu(self.new_btn)
         new_menu.addAction("당번제 업무…", lambda: self.new_project("rotation"))
         new_menu.addAction("마일스톤 프로젝트…", lambda: self.new_project("milestone"))
+        new_menu.addAction("담당 업무 (일정 없이 담당자만)…", lambda: self.new_project("owner"))
         self.new_btn.setMenu(new_menu)
         head.addWidget(self.new_btn)  # the prominent action: trailing end of the page header
         root.addLayout(head)
@@ -904,12 +944,41 @@ class WorkPage(QWidget):
         ph.addWidget(self.edit_btn)
         dl.addLayout(ph)
 
-        dl.addWidget(inset_title("담당자 순번"))
+        self.people_title = inset_title("담당자 순번")
+        dl.addWidget(self.people_title)
         self.people = PeopleRow()
         self.people.reordered.connect(lambda names: self.ctrl.set_members(self.pid, names))
         self.people.removed.connect(self._remove_person)
         self.people.add_clicked.connect(self.edit_project)
         dl.addWidget(self.people)
+
+        # owner duty: memo, a note, the requests it got, and a way to send one
+        self.owner_box = QWidget()
+        ol = QVBoxLayout(self.owner_box)
+        ol.setContentsMargins(0, 0, 0, 0)
+        ol.setSpacing(tokens.space("gap-group"))
+        self.owner_memo = QLabel()
+        self.owner_memo.setWordWrap(True)
+        self.owner_memo.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        ol.addWidget(inset_title("메모"))
+        ol.addWidget(self.owner_memo)
+        info = QLabel("담당 업무는 날짜·순번이 없어요. 일정표, 대시보드 업무 상자, 웹앱의 ‘이번 주 당번’에는 "
+                      "나오지 않고, 업무 요청을 보낼 때 고를 수 있어요.")
+        info.setObjectName("muted")
+        info.setWordWrap(True)
+        ol.addWidget(info)
+        ol.addWidget(inset_title("이 업무에 온 요청"))
+        self.owner_reqs = QLabel()
+        self.owner_reqs.setWordWrap(True)
+        self.owner_reqs.setTextFormat(Qt.PlainText)
+        ol.addWidget(self.owner_reqs)
+        orow = QHBoxLayout()
+        orow.addStretch(1)
+        self.ask_btn = QPushButton("이 업무에 요청 보내기…")
+        self.ask_btn.clicked.connect(lambda: self.request_to.emit(self.pid))
+        orow.addWidget(self.ask_btn)
+        ol.addLayout(orow)
+        dl.addWidget(self.owner_box)
 
         # rotation controls (SettingsPane-like card)
         self.rot_title = inset_title("당번 배정")
@@ -1024,7 +1093,7 @@ class WorkPage(QWidget):
         hl = QVBoxLayout(holder)
         hl.setContentsMargins(0, 0, 0, 0)
         hl.addWidget(self.detail)
-        self.empty = QLabel("왼쪽 위 ‘새 프로젝트’로 당번제 업무나 마일스톤 프로젝트를 만드세요.")
+        self.empty = QLabel("오른쪽 위 ‘새 프로젝트’로 당번제 업무, 마일스톤 프로젝트, 담당 업무를 만드세요.")
         self.empty.setObjectName("muted")
         self.empty.setAlignment(Qt.AlignCenter)
         hl.addWidget(self.empty, 1)
@@ -1058,7 +1127,10 @@ class WorkPage(QWidget):
         self.list.clear()
         for p in projects:
             cur, _ = W.current_next(self.ctrl.tasks(), p.id)
-            sub = f"{p.kind_label}" + (f" · 이번 {cur.assignee}" if cur else "")
+            if p.kind == "owner":
+                sub = "담당 · " + (", ".join(p.members) or "담당자 없음")
+            else:
+                sub = f"{p.kind_label}" + (f" · 이번 {cur.assignee}" if cur else "")
             it = QListWidgetItem(f"{p.name}\n{sub}")
             it.setData(Qt.UserRole, p.id)
             it.setSizeHint(QSize(1, 2 * tokens.space("row-compact") + tokens.space("space-2")))
@@ -1074,14 +1146,25 @@ class WorkPage(QWidget):
         if p is None:
             return
         rot = p.kind == "rotation"
+        owner = p.kind == "owner"
         self.p_title.setText(p.name)
-        self.p_meta.setText(" · ".join(x for x in (p.kind_label, p.freq_label if rot else "",
+        self.p_meta.setText(f"담당 업무 · {len(p.members)}명 · 일정 없음" if owner else " · ".join(x for x in (p.kind_label, p.freq_label if rot else "",
                                                      f"담당 {len(p.members)}명", f"{p.per_turn}명씩" if rot and p.per_turn > 1 else "", p.duty() if rot and p.task_title else "")
                                        if x))
         self.people.set_names(p.members)
+        self.people_title.setText("담당자" if owner else "담당자 순번")
         for w in (self.rot_title, self.rot):
             w.setVisible(rot)
-        self.add_ms.setVisible(not rot)
+        self.add_ms.setVisible(p.kind == "milestone")
+        for w in (self.month_label, self.prev_btn, self.today_btn, self.next_btn, self.hint, self.month):
+            w.setVisible(not owner)
+        self.owner_box.setVisible(owner)
+        if owner:
+            self.owner_memo.setText(p.note or "메모 없음 · 프로젝트 설정(톱니바퀴)에서 적어요")
+            reqs = [r for r in self.ctrl.requests() if r.work_id == p.id][:5]
+            self.owner_reqs.setText("\n\n".join(f"{r.memo}\n{r.sender} → {', '.join(r.to)} · {r.date} · "
+                                                f"{'확인함' if r.acked else '확인 전'}" for r in reqs)
+                                    or "아직 받은 요청이 없어요.")
         self.first.blockSignals(True)
         keep = self.first.currentText()
         self.first.clear()
@@ -1307,7 +1390,7 @@ class WorkSection(QFrame):
         self.refresh()
 
     def refresh(self) -> None:
-        projects = self.ctrl.projects()
+        projects = [p for p in self.ctrl.projects() if p.kind != "owner"]
         self.setVisible(bool(projects))
         tasks = self.ctrl.tasks()
         self.title.setText(f"업무 {len(projects)}개")
