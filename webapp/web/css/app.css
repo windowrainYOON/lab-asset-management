@@ -129,7 +129,7 @@ body { background: var(--grouped-background); color: var(--label); font-family: 
 .loading { display: flex; justify-content: center; padding: 60px 0; }
 .toast { position: fixed; left: 50%; transform: translateX(-50%); bottom: calc(env(safe-area-inset-bottom) + 96px); z-index: 60;
   background: color-mix(in srgb, var(--label) 88%, transparent); color: var(--background); padding: 10px 16px; border-radius: 999px;
-  font: 500 15px var(--font-sans); max-width: calc(100% - 48px); text-align: center; }
+  font: 500 15px var(--font-sans); width: max-content; max-width: calc(100% - 48px); text-align: center; }
 .empty-note { margin: 12px 32px; color: var(--label-secondary); font-size: 15px; }
 a.hig-list__row { color: inherit; text-decoration: none; }
 .wrap-sub { white-space: normal !important; }
@@ -241,3 +241,63 @@ a.hig-list__row { color: inherit; text-decoration: none; }
 .ld.still .ld-ring.r2 { opacity: .55; }
 .ld.still .ld-pulse, .ld.still .ld-bar i { animation: none; }
 .ld.still .ld-bar i { left: 30%; }
+
+/* ---- 장비 예약 timetable (like the desktop app: hours down, blocks in the machine's color) ---- */
+.rg-eqs { display: flex; gap: 8px; overflow-x: auto; padding: 2px 16px 10px; scrollbar-width: none; }
+.rg-eqs::-webkit-scrollbar { display: none; }
+.rg-eq { flex: none; display: inline-flex; align-items: center; gap: 7px; height: 34px; padding: 0 13px; border: 0; border-radius: 17px;
+  background: var(--fill-tertiary); color: var(--label); font: 500 15px var(--font-sans); cursor: pointer; }
+.rg-eq i { width: 10px; height: 10px; border-radius: 5px; flex: none; }
+.rg-eq[aria-pressed="true"] { background: var(--label); color: var(--background); font-weight: 600; }
+.rg-eq.off { color: var(--label-tertiary); }
+.rg-eq.off i { opacity: .4; }
+.rg-eq.rg-mine { margin-left: 4px; background: transparent; box-shadow: inset 0 0 0 1px var(--separator); }
+.rg-eq.rg-mine[aria-pressed="true"] { background: var(--label); box-shadow: none; }
+.rg-bar { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 0 12px 4px 8px; }
+.rg-date { display: flex; align-items: center; min-width: 0; }
+.rg-dt { font: 600 17px var(--font-sans); white-space: nowrap; }
+.rg-today-t { color: var(--accent); font-size: 15px; margin-left: 5px; }
+.rg-seg { display: inline-flex; padding: 2px; border-radius: 9px; background: var(--fill-tertiary); flex: none; }
+.rg-seg button { min-width: 42px; height: 30px; border: 0; border-radius: 7px; background: transparent; color: var(--label); font: 400 14px var(--font-sans); cursor: pointer; }
+.rg-seg button[aria-checked="true"] { background: var(--hig-seg-selected, var(--background)); font-weight: 600; box-shadow: 0 1px 2px color-mix(in srgb, #000 14%, transparent); }
+.rg-meta { font: 400 13px/18px var(--font-sans); color: var(--label-secondary); margin: 0 16px 8px; }
+.rg-card { margin: 0 16px; border-radius: 16px; overflow: hidden; background: var(--hig-raised, var(--background-secondary)); }
+.rg-head { display: flex; margin-left: 44px; border-bottom: 1px solid var(--separator); }
+.rg-head span { flex: 1 1 0; min-width: 0; text-align: center; font: 400 12px/30px var(--font-sans); color: var(--label-secondary); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.rg-head span.rg-today { color: var(--accent); font-weight: 700; }
+.rg-body { position: relative; height: calc(100dvh - 385px); min-height: 300px; overflow-y: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; }
+.rg-card.wk .rg-body { height: calc(100dvh - 415px); }
+.rg-in { position: relative; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+.rg-h { position: absolute; left: 44px; right: 0; border-top: 1px solid var(--separator); }
+.rg-h.half { border-top-style: dashed; opacity: .5; }
+.rg-hl { position: absolute; left: 0; width: 38px; text-align: right; font: 400 11px var(--font-sans); color: var(--label-secondary); transform: translateY(-7px); font-variant-numeric: tabular-nums; }
+.rg-col { position: absolute; top: 0; bottom: 0; border-left: 1px solid var(--separator); }
+.rg-col.rg-today { background: color-mix(in srgb, var(--accent) 5%, transparent); }
+.rg-past { position: absolute; top: 0; pointer-events: none; background: repeating-linear-gradient(135deg, transparent 0 6px, color-mix(in srgb, var(--gray) 12%, transparent) 6px 7px); }
+.rg-b { position: absolute; box-sizing: border-box; overflow: hidden; border-radius: 7px; padding: 4px 6px 4px 9px; cursor: pointer;
+  font: 600 13px/17px var(--font-sans); color: var(--label); }
+.rg-b::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px; background: var(--c); }
+.rg-b small { display: block; font-weight: 400; font-size: 12px; line-height: 15px; color: var(--label-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.rg-b.wk { padding: 3px 2px 3px 6px; font-size: 11px; line-height: 13px; white-space: nowrap; }
+.rg-b.wk small { font-size: 10px; line-height: 12px; }
+.rg-now { position: absolute; height: 2px; margin-top: -1px; background: var(--red); z-index: 2; pointer-events: none; }
+.rg-now::before { content: ""; position: absolute; left: -4px; top: -3px; width: 8px; height: 8px; border-radius: 4px; background: var(--red); }
+.rg-draft { position: absolute; z-index: 4; box-sizing: border-box; border-radius: 7px; padding: 4px 6px 4px 9px; pointer-events: none;
+  background: color-mix(in srgb, var(--c) 88%, transparent); color: #fff; font: 600 13px/17px var(--font-sans); box-shadow: 0 6px 18px rgba(0, 0, 0, .18); }
+.rg-draft small { display: block; font-weight: 500; font-size: 12px; }
+.rg-draft.bad { background: color-mix(in srgb, var(--red) 12%, transparent); color: var(--red); border: 2px dashed var(--red); box-shadow: none; }
+.rg-bub { position: absolute; z-index: 5; pointer-events: none; background: color-mix(in srgb, var(--label) 90%, transparent); color: var(--background);
+  font: 600 14px var(--font-sans); padding: 6px 11px; border-radius: 12px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.rg-bub span { font-weight: 400; opacity: .75; margin-left: 6px; }
+.rg-card.dragging .rg-body { overflow-y: hidden; }
+/* "예약 추가 중…" box: above sheets, below alerts (a confirm can still ask) */
+.hud-dim { position: fixed; inset: 0; z-index: 44; background: rgba(0, 0, 0, .06); }
+.hud { position: fixed; left: 50%; top: 42%; transform: translate(-50%, -50%); z-index: 45; min-width: 156px; box-sizing: border-box; padding: 20px 14px 16px;
+  border-radius: 18px; text-align: center; background: color-mix(in srgb, var(--background-secondary) 86%, transparent);
+  -webkit-backdrop-filter: blur(24px) saturate(1.6); backdrop-filter: blur(24px) saturate(1.6); box-shadow: 0 10px 30px rgba(0, 0, 0, .18);
+  font: 600 15px var(--font-sans); color: var(--label); }
+.hud small { display: block; margin-top: 3px; font-weight: 400; font-size: 12px; color: var(--label-secondary); min-height: 1em; }
+.hud-sp { width: 28px; height: 28px; margin: 0 auto 12px; border-radius: 50%; border: 3px solid color-mix(in srgb, var(--label) 16%, transparent);
+  border-top-color: var(--label-secondary); animation: hud-spin .8s linear infinite; }
+@keyframes hud-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .hud-sp { animation-duration: 2.4s; } }
