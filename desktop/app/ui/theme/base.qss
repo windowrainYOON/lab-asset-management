@@ -1,0 +1,366 @@
+/* Apple HIG look, Desktop profile + macOS Liquid Glass style (data-style="tahoe",
+   components/MacOSStyle). Qt cannot blur what is behind a widget, so every glass layer is
+   drawn the way the design system's "Reduce transparency" fallback draws it: opaque
+   tokens, same shapes. Glass shapes go on functional layers only (toolbar capsules, the
+   sidebar panel, menus); content (tables, cards, charts) stays opaque, never glass.
+   Concentric radii: window 26 -> sidebar panel 18 (inset 8) -> selected row 10.
+   Buttons, segments, tabs and search are capsules; fields 8; inset groups 12; cards 22.
+   Values come from tokens.json through double-brace placeholders, see theme/__init__.py;
+   sizes resolve to the desktop-* tokens (controls 28, body 13, radius 6 / 10 / 12).
+   Do not write hex or px values here (1px hairlines and the 2px focus ring excepted).
+
+   Surfaces (hierarchy.md): level 0 window/content = background · level 1 raised (cards,
+   sidebar, dialogs) = background-secondary · level 2 fields = background-tertiary.
+   States (states-and-interaction.md): hover = label 6%, selected = accent 16% (+ weight),
+   pressed = opacity-pressed, disabled = opacity-disabled, focus = 2px accent. */
+
+/* ---- level 0: window and content ------------------------------------------ */
+QWidget { color: {{c:label}}; }
+/* Window (components/RegionLayout, 띄운 상자 style hig-regions--boxes): the window itself is
+   the lowest face and the sidebar sits on it unpainted (region-base). The canvas and the
+   inspector float on it as two boxes: radius 16, a 1px region-box-edge border, no shade and
+   no drop shadow, 10 between the boxes and to the window edges (0 on the sidebar side).
+   The inspector box is the brightest face (region-box), the canvas one step darker
+   (region-canvas). Scroll areas and pages inside a box are not painted. */
+QMainWindow, #windowBack { background: {{c:region-base}}; }
+#mainArea { background: {{c:region-canvas}}; border: 1px solid {{c:region-box-edge}};
+            border-radius: {{r:region-box-radius}}; }
+#inspectorBox { background: {{c:region-box}}; border: 1px solid {{c:region-box-edge}};
+                border-radius: {{r:region-box-radius}}; }
+/* search bar (user, ds19): a long box above the canvas and inspector boxes, always shown,
+   holding the global search and its tools; same face and shape as the inspector box */
+#searchBar { background: {{c:region-box}}; border: 1px solid {{c:region-box-edge}};
+             border-radius: {{r:region-box-radius}};
+             min-height: {{s:bar-height}}; max-height: {{s:bar-height}}; }
+#searchBar #glassCapsule { background: {{mix:region-box:label:0.05}}; border-color: transparent; }
+#pageBody { background: transparent; }
+#inspector, #inspectorScroll, #inspectorScroll > QWidget > QWidget { background: transparent; border: none; }
+#boxSplit::handle, #mainArea QSplitter::handle { background: transparent; }
+QStatusBar { background: {{c:region-base}}; color: {{t:gray@region-base}}; border: none;
+             font-size: {{f:mac-footnote}}; }
+/* content header: page symbol + name · where the data lives … search, capsules; a hairline under it */
+#contentHeader { background: transparent; border: none;
+                 min-height: {{s:bar-height}}; max-height: {{s:bar-height}}; }
+#headerTitle { font-size: {{f:mac-headline}}; font-weight: {{w:mac-headline}}; color: {{c:label}}; }
+#headerMeta { font-size: {{f:mac-callout}}; color: {{t:label-secondary@region-canvas}}; }
+/* sidebar brand row: logo, app name (L2 size, 700), the data's place (L4), toggle at the end */
+#brandTitle { font-size: {{f:mac-title-3}}; font-weight: 700; color: {{c:label}}; }
+#brandSubtitle { font-size: {{f:mac-footnote}}; color: {{t:label-secondary@region-base}}; }
+#chromeIcon { background: transparent; border: none; border-radius: {{r:field}};
+              min-width: {{s:control-md}}; max-width: {{s:control-md}};
+              min-height: {{s:control-md}}; max-height: {{s:control-md}}; padding: 0; }
+#chromeIcon:hover { background: {{hover}}; }
+/* sidebar bottom row (the reference's "Invite members"): a plain row with a symbol */
+#sidebarFooter { background: transparent; border: none; text-align: left; color: {{c:label}};
+                 padding: 0 {{s:row-pad}}; border-radius: {{r:row}};
+                 min-height: {{s:tahoe-group-row}}; max-height: {{s:tahoe-group-row}}; }
+#sidebarFooter:hover { background: {{hover}}; }
+QMenuBar { background: {{c:region-base}}; }
+
+#glassCapsule { background: {{c:background}}; border: 1px solid {{a:label:0.12}};
+                border-radius: {{half:tahoe-toolbar-item}};
+                min-height: {{s:tahoe-toolbar-item}}; max-height: {{s:tahoe-toolbar-item}}; }
+#glassCapsule QPushButton { background: transparent; border: none;
+                            min-height: {{sub:tahoe-toolbar-item:space-2}}; max-height: {{sub:tahoe-toolbar-item:space-2}};
+                            border-radius: {{halfsub:tahoe-toolbar-item:space-2}}; }
+#glassCapsule QPushButton:hover { background: {{hover}}; }
+#glassCapsule QPushButton:checked { background: {{select}}; }
+#toolbarTitle { font-size: {{f:mac-headline}}; font-weight: {{w:mac-headline}}; color: {{c:label}}; }
+#toolbarSubtitle { font-size: {{f:mac-callout}}; color: {{t:label-secondary}}; }
+/* Sidebar (tahoe): a panel inset 8 from the window edge, radius 18, padding 8, and no
+   divider between panes (the splitter handle is an invisible gap). */
+#sidebar { background: transparent; border: none; }  /* RegionLayout boxes: the sidebar is the window base */
+QSplitter::handle { background: {{c:region-base}}; }
+
+/* ---- level 1: raised (cards, sheets, dialogs) ------------------------------ */
+QDialog, QMessageBox { background: {{c:background-secondary}}; }
+/* cards on the canvas box are the raised face (region-box, like the inspector box), no border */
+#card { background: {{c:region-box}}; border: none; border-radius: {{r:card}}; }
+#card[interactive="true"]:hover { background: {{mix:region-box:accent:0.06}}; }
+#cardTitle { font-size: {{f:mac-title-3}}; font-weight: 600; color: {{c:label}}; }
+#cardValue { font-size: {{f:mac-title-1}}; font-weight: 600; color: {{c:label}}; }
+#kpiValue { font-size: {{f:mac-title-1}}; font-weight: 600; color: {{c:label}}; }
+
+/* ---- text (typography-desktop.md) ------------------------------------------- */
+#pageTitle { font-size: {{f:mac-title-1}}; font-weight: {{w:mac-title-1}}; color: {{c:label}}; }
+#sectionHeader { font-size: {{f:mac-title-2}}; font-weight: {{w:mac-title-2}}; color: {{c:label}}; }
+#sectionTitle { font-size: {{f:mac-title-3}}; font-weight: 600; color: {{c:label}}; }
+#detailTitle { font-size: {{f:mac-title-3}}; font-weight: 600; }
+#groupHeader { font-size: {{f:mac-subheadline}}; font-weight: 600; color: {{t:label-secondary@region-canvas}}; }
+#muted { color: {{t:gray@region-canvas}}; }
+#sidebar #muted { color: {{t:gray@region-base}}; }
+#card #muted, #inspectorBox #muted { color: {{t:gray@region-box}}; }
+QDialog #muted { color: {{t:gray@background-secondary}}; }
+#scopeTitle { font-weight: 600; color: {{c:label}}; }
+#error { color: {{t:red@background-secondary}}; }
+
+/* state words (StatusIndicator): the text stays `label`, the color is in the dot next to it */
+QLabel[state] { color: {{c:label}}; font-weight: 500; }
+
+/* ---- buttons (components/Button, Desktop) ----------------------------------- */
+/* default: fill + 1px separator, radius-control, 28 tall, 12 side padding, 400 */
+QPushButton, QToolButton {
+    min-height: {{s:control-md}}; max-height: {{s:control-md}}; min-width: {{s:control-md}};
+    padding: 0 {{s:control-pad}};
+    border: 1px solid {{c:separator}}; border-radius: {{r:control}};
+    background: {{c:fill}}; color: {{c:label}};
+    font-size: {{f:mac-body}}; font-weight: {{w:mac-body}};
+}
+QPushButton:hover, QToolButton:hover { background: {{mix:fill:label:0.14}}; }
+QPushButton:pressed, QToolButton:pressed { background: {{a:fill:opacity-pressed}}; color: {{a:label:opacity-pressed}}; }
+QPushButton:focus, QToolButton:focus { border: 2px solid {{c:accent}}; }
+QPushButton:disabled, QToolButton:disabled { background: {{a:fill:opacity-disabled}}; color: {{a:label:opacity-disabled}};
+                                             border-color: {{a:separator:opacity-disabled}}; }
+QPushButton:checked { background: {{select}}; color: {{t:accent}}; }
+/* icon-only buttons (hig-button--icon): square control-md, the name in the tooltip */
+QPushButton[iconOnly="true"], #destructive[iconOnly="true"] { min-width: {{s:control-md}}; max-width: {{s:control-md}}; padding: 0; }
+QPushButton::menu-indicator { subcontrol-position: right center; right: {{s:field-pad}}; }
+
+/* prominent: one per window, filled accent, 500 */
+#primary, QDialogButtonBox QPushButton:default { background: {{fill:accent}}; color: {{on:accent}};
+                                                 border-color: transparent; font-weight: 500; }
+#primary:hover, QDialogButtonBox QPushButton:default:hover { background: {{mix:accent-fill:label:0.14}}; }
+#primary:pressed, QDialogButtonBox QPushButton:default:pressed { background: {{afill:accent:opacity-pressed}}; }
+#primary:disabled { background: {{afill:accent:opacity-disabled}}; }
+#tinted { background: {{select}}; color: {{t:accent}}; border-color: transparent; }
+#plain, #addButton { background: transparent; color: {{t:accent}}; border-color: transparent; }
+#plain:hover, #addButton:hover { background: {{hover}}; }
+#plain:checked { background: transparent; color: {{t:accent}}; }
+/* Delete (hig-delete): a red squircle with a white trash glyph, never the primary/trailing
+   slot, kept apart from safe actions, confirmed in an alert. Alerts keep red text. */
+#destructive { background: {{fill:red}}; color: {{on:red}}; border: none;
+               border-radius: {{r:radius-group}}; padding: 0 {{s:control-pad}}; }
+#destructive:hover { background: {{mix:red:label:0.14}}; }
+#destructive:pressed { background: {{afill:red:opacity-pressed}}; }
+#destructive:disabled { background: {{afill:red:opacity-disabled}}; }
+QMessageBox #destructive { background: transparent; border: 1px solid {{c:separator}};
+                           color: {{t:red@background-secondary}}; }
+/* toolbar items: borderless until hovered (components/Toolbar) */
+
+/* segmented control: view switch inside a screen, never top-level navigation */
+#segment { background: transparent; border: none; border-radius: {{half:segment-height}}; padding: 0 {{s:control-pad}};
+           font-weight: 500; }
+#segment:hover { background: {{hover}}; }
+#segment:checked { background: {{c:background-tertiary}}; color: {{c:label}}; font-weight: 600; }
+
+/* ---- fields (TextField / Select, Desktop): tertiary fill + 1px opaque separator --- */
+QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QDateEdit, QTimeEdit, QDateTimeEdit, QPlainTextEdit, QTextEdit {
+    background: {{c:background-tertiary}}; color: {{c:label}};
+    border: 1px solid {{c:separator-opaque}}; border-radius: {{r:field}};
+    selection-background-color: {{fill:accent}}; selection-color: {{on:accent}};
+}
+QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QDateEdit, QTimeEdit, QDateTimeEdit {
+    min-height: {{s:control-md}}; max-height: {{s:control-md}}; padding: 0 {{s:field-pad}};
+}
+/* focus (tahoe): 3px accent ring at 45%; the padding gives back the 2px so text stays put */
+QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus, QPlainTextEdit:focus, QTextEdit:focus,
+QDateEdit:focus, QTimeEdit:focus, QDateTimeEdit:focus { border: {{s:tahoe-focus-ring}} solid {{a:accent:0.45}}; }
+QLineEdit:focus, QComboBox:focus, QDateEdit:focus, QTimeEdit:focus, QDateTimeEdit:focus { padding: 0 {{sub:field-pad:2}}; }
+QAbstractSpinBox:focus { padding-left: {{sub:field-pad:2}}; padding-right: {{sub:stepper-width:2}}; }
+/* NumberInput + Stepper (Desktop): up/down stacked inside the field's end, 20 wide */
+QAbstractSpinBox { padding-right: {{s:stepper-width}}; }
+QAbstractSpinBox::up-button, QAbstractSpinBox::down-button {
+    subcontrol-origin: border; width: {{s:stepper-width}}; border: none;
+    border-left: 1px solid {{c:separator}}; background: transparent; }
+QAbstractSpinBox::up-button { subcontrol-position: top right; border-bottom: 1px solid {{c:separator}}; }
+QAbstractSpinBox::down-button { subcontrol-position: bottom right; }
+QAbstractSpinBox::up-button:hover, QAbstractSpinBox::down-button:hover { background: {{hover}}; }
+QAbstractSpinBox::up-arrow { image: {{i:chevron.up:label-secondary@background-tertiary:mac-footnote}}; }
+QAbstractSpinBox::down-arrow { image: {{i:chevron.down:label-secondary@background-tertiary:mac-footnote}}; }
+/* date field with a calendar popup: a chevron at the end, no box around it (like the stepper column) */
+QDateEdit::drop-down, QDateTimeEdit::drop-down { subcontrol-origin: border; subcontrol-position: center right;
+    width: {{s:stepper-width}}; border: none; background: transparent; }
+QDateEdit::down-arrow, QDateTimeEdit::down-arrow { image: {{i:chevron.down:label-secondary@background-tertiary:mac-footnote}}; }
+QLineEdit:disabled, QComboBox:disabled { color: {{a:label:opacity-disabled}}; }
+QLineEdit[invalid="true"] { border: 1px solid {{c:red}}; }
+/* Select (components/Select): no box, the value text and an 18 round select-cap (fill)
+   with chevron.up.chevron.down; content width; focus = 2px focus ring. Editable combos
+   are text fields and keep the field look. */
+QComboBox:!editable { background: transparent; border: none; padding: 0 {{s:space-1}};
+                      border-radius: {{r:field}}; }
+QComboBox:!editable:hover { background: {{hover}}; }
+QComboBox:!editable:focus { border: 2px solid {{c:primary-focus}}; padding: 0 {{sub:space-1:2}}; }
+QComboBox::drop-down { border: none; width: {{s:select-cap}}; height: {{s:select-cap}};
+                       subcontrol-origin: padding; subcontrol-position: center right;
+                       background: {{c:fill}}; border-radius: {{half:select-cap}}; margin-right: {{s:space-1}}; }
+QComboBox::down-arrow { image: {{i:chevron.up.chevron.down:label-secondary:mac-caption-2}}; }
+QComboBox:editable::drop-down { background: transparent; }
+QComboBox QAbstractItemView { background: {{c:background-secondary}}; border: 1px solid {{a:label:0.12}};
+                              selection-background-color: {{fill:accent}}; selection-color: {{on:accent}}; }
+/* search (tahoe): its own glass capsule in the toolbar, 34 tall, magnifier at the start */
+#globalSearch { background: {{mix:region-box:label:0.05}}; border: 1px solid transparent;
+                border-radius: {{half:tahoe-toolbar-item}}; padding: 0 {{s:control-pad}};
+                min-height: {{s:tahoe-toolbar-item}}; max-height: {{s:tahoe-toolbar-item}}; }
+#globalSearch:focus { border: {{s:tahoe-focus-ring}} solid {{a:accent:0.45}}; padding: 0 {{sub:control-pad:2}}; }
+
+QCheckBox, QRadioButton { min-height: {{s:control-md}}; spacing: {{s:gap-tight}}; }
+/* checkbox (components/Checkbox, Desktop 16): a field-colored box with a hairline; on =
+   accent fill with a white checkmark, mixed = a white dash. Also the boxes in lists and tables. */
+QCheckBox::indicator, QAbstractItemView::indicator {
+    width: {{s:check-size}}; height: {{s:check-size}}; border-radius: {{s:space-1}};
+    border: 1px solid {{a:label:0.28}}; background: {{c:background-tertiary}}; }
+QCheckBox::indicator:hover, QAbstractItemView::indicator:hover { border-color: {{a:label:0.45}}; }
+QCheckBox::indicator:checked, QAbstractItemView::indicator:checked {
+    background: {{fill:accent}}; border-color: {{fill:accent}}; image: {{i:checkmark:on-accent@accent:mac-footnote}}; }
+QCheckBox::indicator:indeterminate, QAbstractItemView::indicator:indeterminate {
+    background: {{fill:accent}}; border-color: {{fill:accent}}; image: {{i:minus:on-accent@accent:mac-footnote}}; }
+QCheckBox::indicator:disabled, QAbstractItemView::indicator:disabled { background: {{c:fill}}; border-color: {{c:fill}}; }
+
+/* ---- menu (components/Menu + tahoe): glass panel radius 12, padding 6, rows 24 with a
+   concentric radius (12 - 6), highlight = accent pill with white text ------------------ */
+QMenu { background: {{c:background-secondary}}; border: 1px solid {{a:label:0.12}}; border-radius: {{r:menu}};
+        padding: {{s:gap-tight}}; min-width: {{s:menu-min-width}}; }
+QMenu::item { min-height: {{s:menu-row}}; padding: 0 {{s:row-pad}}; border-radius: {{rin:menu:gap-tight}}; color: {{c:label}}; }
+QMenu::item:selected { background: {{fill:accent}}; color: {{on:accent}}; }
+QMenu::item:disabled { color: {{a:label:opacity-disabled}}; }
+QMenu::right-arrow { image: {{i:chevron.right:label-secondary:mac-callout}}; }
+QMenu::separator { height: 1px; background: {{c:separator}}; margin: {{s:space-1}} {{s:row-pad}}; }
+QToolTip { background: {{c:background-tertiary}}; color: {{c:label}}; border: 1px solid {{c:separator}};
+           padding: {{s:space-1}} {{s:space-2}}; border-radius: {{r:control}}; }
+
+/* ---- tables and lists (components/Table, Desktop) -------------------------------
+   rows 28 and header 24 (table_model.compact_rows), cells padded row-pad (10), no row
+   separators, striped on wide tables, selection = accent 16%, wrapper radius-group. */
+QTableView, QTableWidget, QTreeWidget, QListWidget, #history {
+    background: {{c:region-box}}; border: 1px solid {{c:separator}}; border-radius: {{r:group}};
+    selection-background-color: {{select}}; selection-color: {{c:label}}; outline: none;
+}
+#card QTableWidget, #card QListWidget, #card #history { background: {{c:region-box}}; border: none; }
+/* in the inspector box a list is a filled group like the inset groups (no border) */
+#inspectorBox QTableView, #inspectorBox QTableWidget, #inspectorBox QListWidget,
+#inspectorBox #history { background: {{mix:region-box:label:0.05}}; border: none; }
+QDialog QTableWidget, QDialog QListWidget,
+QDialog QTreeWidget { background: {{c:background-secondary}}; border: none; }
+QTableView { alternate-background-color: {{c:fill-quaternary}}; gridline-color: transparent; }
+QTableView::item, QTableWidget::item { padding: 0 {{s:row-pad}}; border: none; }
+QListWidget::item { min-height: {{s:row}}; padding: 0 {{s:row-pad}}; border-radius: {{r:list-row}}; }
+QListWidget::item:hover { background: {{hover}}; }
+#history::item { min-height: {{s:row-compact}}; }
+QTableView::item:selected, QListWidget::item:selected, QTreeWidget::item:selected {
+    background: {{select}}; color: {{c:label}}; }
+/* header: 12/15 600 label-secondary (at 4.5:1), aligned like its column */
+QHeaderView::section { background: {{c:region-box}}; color: {{t:label-secondary@region-box}};
+                       border: none; border-bottom: 1px solid {{c:separator}};
+                       padding: 0 {{s:row-pad}}; font-size: {{f:mac-callout}}; font-weight: 600; }
+#inspectorBox QHeaderView::section { background: {{mix:region-box:label:0.05}}; }
+QDialog QHeaderView::section { background: {{c:background-secondary}}; }
+/* sort direction: arrow.up = ascending, arrow.down = descending, in accent */
+QHeaderView::up-arrow { image: {{i:arrow.up:accent@region-box:mac-callout}};
+                        subcontrol-position: center right; padding-right: {{s:field-pad}}; }
+QHeaderView::down-arrow { image: {{i:arrow.down:accent@region-box:mac-callout}};
+                          subcontrol-position: center right; padding-right: {{s:field-pad}}; }
+/* TabView (≤6 tabs) */
+QTabWidget::pane { border: 1px solid {{c:separator}}; border-radius: {{r:group}}; }
+QTabBar::tab { min-height: {{s:control-sm}}; padding: 0 {{s:control-pad}}; background: transparent;
+               border-radius: {{half:control-sm}}; }
+QTabBar::tab:hover { background: {{hover}}; }
+QTabBar::tab:selected { background: {{c:background-tertiary}}; font-weight: 600; }
+QCalendarWidget QAbstractItemView { selection-background-color: {{fill:accent}}; selection-color: {{on:accent}};
+                                    background: {{c:background}}; }
+QCalendarWidget QWidget#qt_calendar_navigationbar { background: {{c:background-secondary}}; }
+/* the day grid is a table: no row padding there, or two-digit days do not fit */
+QCalendarWidget QTableView::item { padding: 0; }
+QCalendarWidget QTableView { alternate-background-color: {{c:background}}; color: {{c:label}}; }
+
+/* ---- sidebar (components/Sidebar + tahoe, in the user's reference look): rows 32,
+   side padding 10, row radius 10 (panel 18 - inset 8). sidebar.NavDelegate paints the
+   rows: gray group titles, label-secondary symbols, a count at the end, and the current
+   row as a raised pill (background-tertiary + hairline + soft shadow), 600 text.
+   Hover = label 6%, never the selection look. Qt's own row painting stays off. ---- */
+#navTree { border: none; background: transparent; outline: none; show-decoration-selected: 0;
+           selection-background-color: transparent; }
+#navTree::item, #navTree::item:hover, #navTree::item:selected { background: transparent; border: none; }
+#navTree::branch { background: transparent; border: none; }
+
+/* ---- progress (Desktop: 6 thick) -------------------------------------------------- */
+QProgressBar { background: {{c:fill}}; border: none; border-radius: {{half:progress-height}};
+               max-height: {{s:progress-height}}; min-height: {{s:progress-height}}; color: transparent; }
+QProgressBar::chunk { background: {{c:accent}}; border-radius: {{half:progress-height}}; }
+
+/* ---- scroll bars ------------------------------------------------------------------ */
+QScrollArea { background: transparent; border: none; }
+QScrollBar:vertical { background: transparent; width: {{s:space-3}}; margin: 0; }
+QScrollBar:horizontal { background: transparent; height: {{s:space-3}}; margin: 0; }
+QScrollBar::handle:vertical, QScrollBar::handle:horizontal { background: {{c:fill}}; border-radius: {{s:space-1}};
+                                                             min-height: {{s:control-md}}; min-width: {{s:control-md}};
+                                                             margin: {{s:space-1}}; }
+QScrollBar::handle:hover { background: {{c:fill-secondary}}; }
+QScrollBar::add-line, QScrollBar::sub-line { width: 0; height: 0; }
+QScrollBar::add-page, QScrollBar::sub-page { background: transparent; }
+
+/* ---- inspector (tahoe inset groups, components/MacOSStyle) ------------------------
+   title in callout label-secondary; group radius 12 with a hairline around it; rows 32
+   with the label at the start and the value at the end, hairlines between rows. */
+/* SettingsPane: heading 13/600 label on the card text line; the card is filled (5% toward
+   label), no border or shadow, radius-group; rows 40; separators run from the text line to
+   the inner padding (InsetGroup gives the side padding, rows have none). */
+#insetTitle { font-size: {{f:mac-body}}; font-weight: 600; color: {{c:label}}; }
+#insetGroup { background: {{mix:background:label:0.05}}; border: none; border-radius: {{r:radius-group}}; }
+/* in the inspector box: its face mixed 5% toward label (SettingsPane); on the canvas box the
+   group is a raised card face instead (5% toward label would vanish into region-canvas) */
+#inspectorBox #insetGroup { background: {{mix:region-box:label:0.05}}; }
+#mainArea #insetGroup { background: {{c:region-box}}; }
+#insetRow { background: transparent; min-height: {{s:settings-row}}; }
+#insetRow[sep="true"] { border-top: 1px solid {{c:separator}}; }
+#insetRow QLabel { background: transparent; }
+/* value field (hig-value): 22 tall, radius 6, filled, no border, callout, numbers at the end */
+#value { background: {{c:fill-tertiary}}; border: none; border-radius: {{r:value}};
+         min-height: {{s:tahoe-value-field}}; max-height: {{s:tahoe-value-field}};
+         padding: 0 {{s:space-2}}; font-size: {{f:mac-callout}}; color: {{c:label}}; }
+
+/* ---- 일정 (Calendar-style) ------------------------------------------------------------
+   title: large-title with the month in bold; segments in a glass capsule, the chosen one
+   a raised pill with 600 text (bundle.css .hig-segmented). */
+#calendarTitle { font-size: {{f:mac-large-title}}; font-weight: {{w:mac-large-title}}; color: {{c:label}}; }
+#calendarSubtitle { font-size: {{f:mac-title-2}}; color: {{t:label-secondary}}; }
+#glassCapsule #segment { border: 1px solid transparent; padding: 0 {{s:control-pad}}; font-weight: 500; }
+#glassCapsule #segment:checked { background: {{c:background-tertiary}}; border-color: {{a:label:0.12}};
+                                 color: {{c:label}}; font-weight: 600; }
+#glassCapsule #segment:hover:!checked { background: {{hover}}; }
+#eventTitle { font-size: {{f:mac-headline}}; font-weight: 600; }
+/* a time field without its stepper (inspector rows): no room kept for the arrows */
+QAbstractSpinBox[compact="true"] { padding-right: {{s:field-pad}}; }
+QAbstractSpinBox[compact="true"]::up-button, QAbstractSpinBox[compact="true"]::down-button { width: 0; border: none; }
+QAbstractSpinBox[compact="true"]::up-arrow, QAbstractSpinBox[compact="true"]::down-arrow { image: none; }
+QAbstractSpinBox[compact="true"]:focus { padding-right: {{sub:field-pad:2}}; }
+
+/* ---- 업무 (Work): people chips (components/DragDrop) and dashboard boxes ------------------
+   chip = a raised row with an always-visible grip at the start; while lifted, the original
+   stays as a faint placeholder. */
+#personChip { background: {{c:background}}; border: 1px solid {{c:separator}}; border-radius: {{r:field}}; }
+#personChip:hover { background: {{hover}}; }
+#personChip:focus { border: 2px solid {{c:primary-focus}}; }
+#personChip[dragging="true"] { background: transparent; border: 1px dashed {{c:separator}}; }
+#personChip[dragging="true"] QLabel { color: {{a:label:0.35}}; }
+#personChip QLabel { background: transparent; }
+#chipRank { color: {{t:label-secondary@region-box}}; font-weight: 600; }
+#boxTitle { background: transparent; border: none; padding: 0; text-align: left;
+            font-size: {{f:mac-title-3}}; font-weight: 600; color: {{c:label}}; }
+#boxTitle:hover { color: {{t:accent@background}}; }
+
+/* ---- 공지사항: reading view and who has read it ---------------------------------------
+   reader = content only (no field look); name chips: read = accent fill + ✓, not yet =
+   hairline outline; the dashboard rows lift on hover like a list row. */
+#noticeHeading { font-size: {{f:mac-title-2}}; font-weight: 700; color: {{c:label}}; }
+#noticeBody { background: transparent; border: none; padding: 0; color: {{c:label}};
+              font-size: {{f:mac-body}}; }
+#noticeBody:focus { border: none; padding: 0; }
+#hairline { background: {{c:separator}}; border: none; }
+#readHeading { font-size: {{f:mac-body}}; font-weight: 600; color: {{c:label}}; }
+#readerChip { background: {{c:background}}; color: {{c:label}}; border: 1px solid {{c:separator}};
+              border-radius: {{r:field}}; padding: 0 {{s:control-pad}};
+              min-height: {{s:row-compact}}; max-height: {{s:row-compact}}; }
+#readerChip:hover { background: {{hover}}; }
+#readerChip:checked { background: {{fill:accent}}; color: {{on:accent}}; border: 1px solid {{fill:accent}}; }
+#readerChip:focus { border: 2px solid {{c:primary-focus}}; }
+#noticeRow { background: transparent; border-radius: {{r:field}}; }
+#noticeRow:hover { background: {{hover}}; }
+#noticeRow QLabel { background: transparent; }
+#readCount { color: {{t:label-secondary@region-box}}; font-size: {{f:mac-subheadline}}; }
+
+/* Badge (Desktop): red capsule 16 tall, white 11/600 tabular digits, padding 5 */
+#countBadge { background: {{fill:red}}; color: {{on:red}}; border-radius: {{half:icon-md}};
+              padding: 0 {{sub:space-2:3}}; }
+/* Delete inside a glass capsule keeps its red round fill (hig-delete), white glyph */
+#glassCapsule #destructive { background: {{fill:red}}; }
+#glassCapsule #destructive:hover { background: {{mix:red:label:0.14}}; }

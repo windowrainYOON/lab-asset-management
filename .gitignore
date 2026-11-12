@@ -1,0 +1,60 @@
+# ---- Never commit: login tokens, cookies, keys, lab data ----------------------------------
+# Google OAuth client and login tokens (bundled into the app at build time / kept in state/)
+secrets/
+state/
+client_secret*.json
+google_client*.json
+token.json
+*_token.json
+google_token*.json
+credentials*.json
+*.pem
+*.key
+.env
+.env.*
+# Browser / app cookies and local storage dumps
+*cookie*
+*.cookies
+*.sqlite
+*.sqlite3
+*.db
+
+# Lab data (only the program is committed)
+data/
+*.labproj
+*.labproj-wal
+*.labproj-shm
+*.xlsx
+*.xls
+*.csv
+"Asset Manager 설정.json"
+orders/
+screenshots/
+backups/
+releases/
+logs/
+*.log
+*.tar.gz
+*.tgz
+
+# ---- Web app ----------------------------------------------------------------------------
+# This lab's sheet ids and first-password hash (copy webapp/private.example.gs)
+webapp/private/
+# Generated one-file server, holds the private values above
+webapp/paste/Code.gs
+node_modules/
+
+# ---- Desktop app build output -----------------------------------------------------------
+build/
+dist/
+*.spec
+desktop/assets/icon/icon.iconset/
+desktop/assets/icon/*.icns
+
+# ---- Python / OS ------------------------------------------------------------------------
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+.DS_Store
