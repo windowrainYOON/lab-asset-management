@@ -8,10 +8,11 @@ to the sheet's 설정 tab.
 """
 from __future__ import annotations
 
+import dataclasses
 from datetime import date, time, timedelta
 
 from PySide6.QtCore import QRectF, Qt, QThread, QTime, Signal
-from PySide6.QtGui import QColor, QFont, QPainter, QPen
+from PySide6.QtGui import QColor, QFont, QFontMetricsF, QPainter, QPen
 from PySide6.QtWidgets import (
     QAbstractItemView, QComboBox, QDialog, QDialogButtonBox, QFrame, QGridLayout, QHBoxLayout, QHeaderView,
     QLabel, QMessageBox, QPushButton, QScrollArea, QSpinBox, QStyledItemDelegate, QTableWidget,
@@ -29,6 +30,9 @@ DATE_W = 76
 KIND_ROLE = Qt.UserRole + 1   # "day" | "fold"
 VALUE_ROLE = Qt.UserRole + 2  # time | text | None
 DATE_ROLE = Qt.UserRole + 3
+OUT_ROLE = Qt.UserRole + 4    # clock-out time | None
+STATUS_ROLE = Qt.UserRole + 5  # att.day_status(): late | excused | ontime | text | none
+LEAVE_ROLE = Qt.UserRole + 6  # True: this day's clock-out was a late leave (next day excused)
 
 
 def _hm(t: time | None) -> str:
@@ -55,8 +59,9 @@ class _CalWorker(QThread):
 
 
 class CellDelegate(QStyledItemDelegate):
-    """Clock-in times; late ones on a warning pill, words (휴가 …) on a gray pill,
-    folded rows (weekend / holiday / excluded) as one line of text."""
+    """Clock-in times; late ones on a warning pill, excused ones (after a late leave) on a blue
+    pill, then the clock-out in gray when there is one (indigo when it was a late leave);
+    words (휴가 …) on a gray pill, folded rows (weekend / holiday / excluded) as one line of text."""
 
     def __init__(self, page: "AttendancePage"):
         super().__init__(page.table)
@@ -96,20 +101,34 @@ class CellDelegate(QStyledItemDelegate):
         settings = self.page.settings()
         selected = (self.page.sel_person == self.page.col_person(index.column()) and self.page.sel_day == d)
         if isinstance(v, time):
-            late = settings.is_late(v)
+            st = index.data(STATUS_ROLE) or ""
+            late, excused = st == "late", st == "excused"
+            out = index.data(OUT_ROLE)
             text = v.strftime("%H:%M")
             f.setBold(late)
             p.setFont(f)
             w = p.fontMetrics().horizontalAdvance(text) + 14
-            pill = QRectF(r.center().x() - w / 2, r.center().y() - 11, w, 22)
-            if late:
+            out_text = ("– " + out.strftime("%H:%M")) if isinstance(out, time) else ""
+            fs = QFont(f)
+            fs.setBold(False)
+            fs.setPointSizeF(max(8.0, f.pointSizeF() - 1.5))
+            ow = QFontMetricsF(fs).horizontalAdvance(out_text) + 4 if out_text else 0
+            if ow and w + ow > r.width() - 8:
+                out_text, ow = "", 0          # too narrow: the clock-out stays in the tooltip
+            x0 = r.center().x() - (w + ow) / 2
+            pill = QRectF(x0, r.center().y() - 11, w, 22)
+            if late or excused:
                 p.setPen(Qt.NoPen)
-                p.setBrush(tokens.color("status-warning-tint"))
+                p.setBrush(tokens.color("status-warning-tint" if late else "status-info-tint"))
                 p.drawRoundedRect(pill, 7, 7)
-                p.setPen(tokens.text("orange", "region-box"))
+                p.setPen(tokens.text("orange" if late else "accent", "region-box"))
             else:
                 p.setPen(tokens.text("label", "region-box"))
             p.drawText(pill, Qt.AlignCenter, text)
+            if out_text:
+                p.setFont(fs)
+                p.setPen(tokens.text("indigo" if index.data(LEAVE_ROLE) else "label-secondary", "region-box"))
+                p.drawText(QRectF(pill.right() + 4, r.top(), ow, r.height()), Qt.AlignVCenter | Qt.AlignLeft, out_text)
         elif v:
             text = str(v)
             p.setFont(f)
@@ -190,6 +209,8 @@ class AttendanceInspector(QScrollArea):
         self.day_in = QLabel()
         self.day_rule = QLabel()
         self.day_group.add_row("출근", self.day_in)
+        self.day_out = QLabel()
+        self.day_group.add_row("퇴근", self.day_out)
         self.day_group.add_row("기준", self.day_rule)
         self.lay.addWidget(self.day_group)
         self.lay.addWidget(inset_title("이번 달 지각"))
@@ -198,7 +219,7 @@ class AttendanceInspector(QScrollArea):
         self.late_holder = QWidget()
         self.late_holder.setLayout(self.late_group)
         self.lay.addWidget(self.late_holder)
-        hint = QLabel("기록은 출퇴근 웹앱에서만 남기고 고칠 수 있습니다. 이 앱에서는 열람만 됩니다.")
+        hint = QLabel("기록은 출입문 태그(웹앱)로만 남습니다. 퇴근은 찍은 사람만 보입니다. 이 앱에서는 열람만 됩니다.")
         hint.setObjectName("muted")
         hint.setWordWrap(True)
         self.lay.addWidget(hint)
@@ -222,7 +243,7 @@ class AttendanceInspector(QScrollArea):
         self.t_present.set("출근", f"{st.present} / {st.workdays}일")
         self.t_late.set("지각", f"{st.late}회", warn=st.late > 0)
         self.t_avg.set("평균 출근", _hm(st.avg_in))
-        self.t_ontime.set("정시 출근", f"{st.ontime}회")
+        self.t_ontime.set("정시 출근", f"{st.ontime}회" + (f" (감안 {st.excused})" if st.excused else ""))
         show_day = day is not None and day.month == m.month
         self.day_title.setVisible(show_day)
         self.day_group.setVisible(show_day)
@@ -234,13 +255,23 @@ class AttendanceInspector(QScrollArea):
                 self.day_in.setText(f"{info.reason} · 계산 제외")
                 self.day_in.setStyleSheet("")
             elif isinstance(v, time):
-                late = s.is_late(v)
-                self.day_in.setText(f"{_hm(v)} · 지각 {s.late_by(v)}분" if late else f"{_hm(v)} · 정시")
+                st_day = att.day_status(m, day, person, s)
+                late = st_day == "late"
+                text = (f"{_hm(v)} · 지각 {s.late_by(v)}분" if late else
+                        f"{_hm(v)} · 감안 (전날 늦은 퇴근)" if st_day == "excused" else f"{_hm(v)} · 정시")
+                self.day_in.setText(text)
                 c = tokens.text("orange", "region-box") if late else tokens.text("label", "region-box")
                 self.day_in.setStyleSheet(f"color: {tokens.css(c)}; font-weight: {600 if late else 400};")
             else:
                 self.day_in.setText(str(v) if v else "기록 없음")
                 self.day_in.setStyleSheet("")
+            o = m.get_out(day, person)
+            if o is None:
+                self.day_out.setText("기록 없음")
+            else:
+                nxt = isinstance(v, time) and o < v
+                self.day_out.setText(f"{'다음날 ' if nxt else ''}{_hm(o)}"
+                                     + (" · 늦은 퇴근, 다음날 지각 감안" if att.late_leave(m, day, person, s) else ""))
             self.day_rule.setText(f"{s.start.strftime('%H:%M')} · 허용 {s.grace}분")
         self._set_late(st.late_days)
 
@@ -301,6 +332,10 @@ class AttendanceSettingsDialog(QDialog):
             self.day_btns.append(b)
             dl.addWidget(b)
         g.add_row("근무 요일", days)
+        self.late_out = QTimeEdit(QTime(s.late_out.hour, s.late_out.minute))
+        self.late_out.setDisplayFormat("HH:mm")
+        g.add_row("늦은 퇴근 기준", self.late_out)
+        self._base = s
         hol = QLabel("자동 제외 · Google 캘린더 ‘대한민국 공휴일’")
         hol.setObjectName("muted")
         g.add_row("한국 공휴일", hol)
@@ -311,6 +346,7 @@ class AttendanceSettingsDialog(QDialog):
         lay.addWidget(self.rule)
         self.start.timeChanged.connect(self._rule)
         self.grace.valueChanged.connect(self._rule)
+        self.late_out.timeChanged.connect(self._rule)
         self._rule()
         lay.addWidget(inset_title("기록 시트"))
         g2 = InsetGroup()
@@ -330,14 +366,18 @@ class AttendanceSettingsDialog(QDialog):
     def value(self) -> att.AttendanceSettings:
         t = self.start.time()
         days = frozenset(i for i, b in enumerate(self.day_btns) if b.isChecked())
-        return att.AttendanceSettings(time(t.hour(), t.minute()), self.grace.value(), days or frozenset(range(5)))
+        lo = self.late_out.time()
+        return dataclasses.replace(self._base, start=time(t.hour(), t.minute()), grace=self.grace.value(),
+                                   workdays=days or frozenset(range(5)), late_out=time(lo.hour(), lo.minute()))
 
     def _rule(self) -> None:
         s = self.value()
         late = (s.deadline.hour * 60 + s.deadline.minute + 1)
         self.rule.setText(f"{s.deadline.strftime('%H:%M')}까지 출근하면 정시, {late // 60:02d}:{late % 60:02d}부터 "
                           "지각으로 표시됩니다. 근무 요일이 아닌 날, 공휴일, 일정에서 ‘출퇴근 기록에서 제외’를 켠 날은 "
-                          "접혀 보이고 계산에서 빠집니다.")
+                          "접혀 보이고 계산에서 빠집니다. 다음날 새벽 "
+                          f"{s.late_out.strftime('%H:%M')} 이후에 퇴근을 찍으면 그다음 날(둘 다 근무 요일일 때) "
+                          "지각을 감안합니다.")
 
     def _save(self) -> None:
         from .cloud import run_blocking
@@ -450,7 +490,7 @@ class AttendancePage(QWidget):
         el.addWidget(self.create_btn, 0, Qt.AlignLeft)
         el.addStretch(1)
         cl.addWidget(self.empty)
-        self.legend = QLabel("주황 = 지각 · — = 기록 없음 · 휴가·출장 = 시트에 적힌 글자 · 접힌 줄 = 주말·공휴일·제외 일정")
+        self.legend = QLabel("주황 = 지각 · 파랑 = 지각 감안(전날 늦은 퇴근) · 회색 – 시각 = 퇴근 (보라 = 늦은 퇴근) · — = 기록 없음 · 휴가·출장 = 시트에 적힌 글자 · 접힌 줄 = 주말·공휴일·제외 일정")
         self.legend.setObjectName("muted")
         self.legend.setWordWrap(True)
         cl.addWidget(self.legend)
@@ -597,7 +637,7 @@ class AttendancePage(QWidget):
         for d in dates:
             info = att.day_info(d, s, self.holidays, self.excluded)
             if self.only_late:
-                if not info.workday or not any(att.status(m.get(d, p), s) == "late" for p in cols):
+                if not info.workday or not any(att.day_status(m, d, p, s) == "late" for p in cols):
                     continue
             rows.append((d, info))
         t = self.table
@@ -631,8 +671,20 @@ class AttendancePage(QWidget):
                 cell.setData(KIND_ROLE, "day")
                 cell.setData(DATE_ROLE, d)
                 cell.setData(VALUE_ROLE, v)
-                tip = (f"{p} · {_day_label(d)} · {v.strftime('%H:%M')}" + (" · 지각" if s.is_late(v) else "")
-                       if isinstance(v, time) else f"{p} · {_day_label(d)} · {v or '기록 없음'}")
+                st = att.day_status(m, d, p, s)
+                out = m.get_out(d, p)
+                leave = att.late_leave(m, d, p, s)
+                cell.setData(STATUS_ROLE, st)
+                cell.setData(OUT_ROLE, out)
+                cell.setData(LEAVE_ROLE, leave)
+                if isinstance(v, time):
+                    tip = f"{p} · {_day_label(d)} · {v.strftime('%H:%M')} 출근"
+                    tip += {"late": " · 지각", "excused": " · 지각 감안 (전날 늦은 퇴근)"}.get(st, "")
+                    if out is not None:
+                        tip += f" · {'다음날 ' if out < v else ''}{out.strftime('%H:%M')} 퇴근"
+                        tip += " · 늦은 퇴근" if leave else ""
+                else:
+                    tip = f"{p} · {_day_label(d)} · {v or '기록 없음'}"
                 cell.setToolTip(tip)
                 t.setItem(r, c, cell)
             t.setRowHeight(r, ROW_H)

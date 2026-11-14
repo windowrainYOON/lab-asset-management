@@ -221,6 +221,86 @@ test('the tagging log keeps every tap with the phone id', () => {
   assert.ok(log.every(r => r[2] === h.device));
 });
 
+console.log('퇴근 태깅');
+function plain() { return fresh({ props: { DB_SHEET_ID: 'DBX', ALLOW_PLAIN_TAP: '1' } }); }
+function cell(h, ymd) { return h.books.ATT.getSheetByName(ymd.slice(0, 7)).data[+ymd.slice(8)][2]; }
+test('a later tap is the clock-out (switchable); inside the clock-in range it is "already"', () => {
+  const h = plain();
+  assert.strictEqual(h.as('가나다', { action: 'tap' }).kind, 'in');
+  h.setNow('2026-11-11T09:50:00+09:00');
+  assert.strictEqual(h.as('가나다', { action: 'tap' }).kind, 'already');
+  h.setNow('2026-11-11T19:10:00+09:00');
+  let r = h.as('가나다', { action: 'tap' });
+  assert.deepStrictEqual([r.kind, r.choices, r.inTime, r.outTime], ['out', ['in', 'out'], '08:55', '19:10']);
+  assert.strictEqual(cell(h, '2026-11-11'), '08:55–19:10');
+  r = h.as('가나다', { action: 'tap.switch', kind: 'in' });
+  assert.strictEqual(r.kind, 'already');
+  assert.strictEqual(cell(h, '2026-11-11'), '08:55');
+  h.as('가나다', { action: 'tap.switch', kind: 'out' });
+  assert.strictEqual(cell(h, '2026-11-11'), '08:55–19:10');
+  h.setNow('2026-11-11T21:30:00+09:00');
+  h.as('가나다', { action: 'tap' });
+  assert.strictEqual(cell(h, '2026-11-11'), '08:55–21:30');
+});
+test('before 08:30 the tap closes yesterday; at/after 03:00 the next clock-in is not late', () => {
+  const h = plain();
+  h.as('가나다', { action: 'tap' });
+  h.setNow('2026-11-12T03:40:00+09:00');
+  let r = h.as('가나다', { action: 'tap' });
+  assert.deepStrictEqual([r.kind, r.day, r.lateLeave, r.choices], ['out_y', '2026-11-11', true, ['out_y', 'in']]);
+  assert.strictEqual(cell(h, '2026-11-11'), '08:55–03:40');
+  h.setNow('2026-11-12T11:20:00+09:00');
+  r = h.as('가나다', { action: 'tap' });
+  assert.deepStrictEqual([r.kind, r.late, r.choices], ['in', 'excused', []]);
+  const home = h.as('가나다', { action: 'home' }).attendance;
+  assert.deepStrictEqual([home.mine, home.mineLate, home.mineExcused], ['11:20', false, true]);
+  const m = h.as('가나다', { action: 'attendance.month', ym: '2026-11' });
+  assert.deepStrictEqual([m.stats['가나다'].late, m.stats['가나다'].excused, m.stats['가나다'].lateLeave], [0, 1, 1]);
+});
+test('leaving before 03:00 does not excuse; weekend days are left out of the rule', () => {
+  let h = plain();
+  h.as('가나다', { action: 'tap' });
+  h.setNow('2026-11-12T02:30:00+09:00');
+  assert.strictEqual(h.as('가나다', { action: 'tap' }).lateLeave, false);
+  h.setNow('2026-11-12T11:20:00+09:00');
+  assert.strictEqual(h.as('가나다', { action: 'tap' }).late, 'late');
+  h = plain();
+  h.setNow('2026-11-13T09:00:00+09:00');
+  h.as('가나다', { action: 'tap' });
+  h.setNow('2026-11-14T04:00:00+09:00');
+  assert.strictEqual(h.as('가나다', { action: 'tap' }).lateLeave, false);   // Friday night → Saturday
+  h.setNow('2026-11-16T10:30:00+09:00');
+  assert.strictEqual(h.as('가나다', { action: 'tap' }).late, 'late');       // Monday is not excused
+});
+test('08:00–08:30 with yesterday open: clock-in first, can switch to yesterday\'s clock-out', () => {
+  const h = plain();
+  h.as('가나다', { action: 'tap' });
+  h.setNow('2026-11-12T08:10:00+09:00');
+  let r = h.as('가나다', { action: 'tap' });
+  assert.deepStrictEqual([r.kind, r.choices], ['in', ['out_y', 'in']]);
+  assert.strictEqual(cell(h, '2026-11-12'), '08:10');
+  r = h.as('가나다', { action: 'tap.switch', kind: 'out_y' });
+  assert.strictEqual(r.kind, 'out_y');
+  assert.deepStrictEqual([cell(h, '2026-11-12'), cell(h, '2026-11-11')], ['', '08:55–08:10']);
+});
+test('a double read within a minute writes nothing; switching expires after 10 minutes', () => {
+  const h = plain();
+  h.as('가나다', { action: 'tap' });
+  h.setNow('2026-11-11T19:10:00+09:00');
+  h.as('가나다', { action: 'tap' });
+  h.setNow('2026-11-11T19:10:30+09:00');
+  const r = h.as('가나다', { action: 'tap' });
+  assert.ok(r.repeat && r.kind === 'out' && r.outTime === '19:10');
+  h.setNow('2026-11-11T19:25:00+09:00');
+  assert.strictEqual(h.as('가나다', { action: 'tap.switch', kind: 'in' }).code, 'switch_expired');
+});
+test('typed cells like "8:55 ~ 19:10" read as clock-in and clock-out', () => {
+  const h = plain();
+  h.books.ATT.getSheetByName('2026-11').data[10][2] = '8:55 ~ 3:30';
+  h.setNow('2026-11-11T12:00:00+09:00');
+  assert.strictEqual(h.as('가나다', { action: 'tap' }).late, 'excused');
+});
+
 console.log('장비 예약');
 const NEW = { action: 'reservation.create', equipmentId: 'eq000001', start: '2026-11-12 13:00', end: '2026-11-12 15:00', purpose: '실험' };
 test('create, then overlap / unit / max / past / 점검 중 are refused', () => {

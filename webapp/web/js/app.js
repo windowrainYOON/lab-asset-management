@@ -24,6 +24,7 @@
     back: '<path d="M15 5l-7 7 7 7"/>',
     bigcheck: '<circle cx="12" cy="12" r="10"/><path d="m7.5 12.3 3 3 6-6.3"/>',
     bigwarn: '<circle cx="12" cy="12" r="10"/><path d="M12 7v6M12 16.5v.5"/>',
+    bigmoon: '<circle cx="12" cy="12" r="10"/><path d="M14.5 7.2a5.2 5.2 0 1 0 2.3 7.6 4.3 4.3 0 0 1-2.3-7.6z"/>',
     chevr: '<path d="m9 5 7 7-7 7"/>',
     chevl: '<path d="m15 5-7 7 7 7"/>',
     plus: '<path d="M12 5v14M5 12h14"/>',
@@ -463,19 +464,56 @@
   }
 
   // ---------- a tag tap ----------
+  // kind: in (오늘 출근) · out (오늘 퇴근) · out_y (어제 퇴근) · already · text. choices: kinds the person can switch to.
+  var KIND_LABEL = { 'in': '출근', out: '퇴근', out_y: '어제 퇴근' };
   function tapScreen(tag) {
-    load(null, function () { return api('tap', tag); }, function (r) {
-      var kind = r.result === '기록' ? (r.message.indexOf('지각') >= 0 ? 'warn' : 'ok') : r.result === '이미 출근' || r.result === '중복' ? 'ok' : 'warn';
-      return [
-        el('div.tap', icon(kind === 'ok' ? 'bigcheck' : 'bigwarn', 'bigok' + (kind === 'warn' ? ' warn' : '')),
-          el('div.tap-t', r.result === '기록' ? '출근 기록됨' : r.result === '텍스트 있음' ? '그대로 뒀어요' : '이미 출근했어요'),
+    load(null, function () { return api('tap', tag); }, function (r) { return tapResult(r); }, { tab: false }).then(null, null);
+  }
+  function tapResult(r) {
+    var holder = el('div');
+    function draw(r) {
+      var out = r.kind === 'out' || r.kind === 'out_y';
+      var warn = r.kind === 'text' || r.late === 'late';
+      var title = { 'in': '출근 기록됨', out: '퇴근 기록됨', out_y: '어제 퇴근 기록됨', already: '이미 출근했어요', text: '그대로 뒀어요' }[r.kind] || '';
+      var who = store('lab_member') + ' · ' + shortDay(r.day) + (out && r.inTime ? ' ' + r.inTime + ' 출근' : '');
+      var badge = null;
+      if (r.kind === 'out_y' && r.lateLeave) badge = status('info', '늦은 퇴근 · 오늘 지각 감안');
+      else if (r.kind === 'in' || r.kind === 'already') {
+        badge = r.late === 'late' ? status('warning', '지각') : r.late === 'excused' ? status('info', '감안 · 전날 늦은 퇴근') : status('success', '정시 출근');
+      }
+      var seg = null;
+      if (r.choices && r.choices.length) {
+        var shown = r.kind === 'already' ? 'in' : r.kind;
+        seg = el('div.m.pick-kind', el('div.lbl', '이 태그를'),
+          el('div.hig-segmented.hig-segmented--full', { role: 'radiogroup', 'aria-label': '출근 또는 퇴근' }, r.choices.map(function (k) {
+            var label = k === 'in' && r.choices.indexOf('out_y') >= 0 ? '오늘 출근' : KIND_LABEL[k];
+            return el('button.hig-segmented__item', { role: 'radio', 'aria-checked': String(k === shown), onclick: function (e) {
+              if (k === shown) return;
+              var bar = e.currentTarget.parentNode;
+              [].forEach.call(bar.children, function (b) { b.disabled = true; });
+              api('tap.switch', { kind: k }).then(function (n) { draw(n); toast(KIND_LABEL[k] + '으로 바꿨어요'); },
+                function (err) { [].forEach.call(bar.children, function (b) { b.disabled = false; }); failed(err); });
+            } }, label);
+          })));
+      }
+      var note;
+      if (r.kind === 'out_y') note = '08:30 전에 찍으면 어제 퇴근으로 잡아요.' + (r.lateLeave ? ' 오늘 출근은 늦어도 지각으로 세지 않아요.' : '');
+      else if (r.kind === 'out') note = '나중에 다시 찍으면 더 늦은 시각으로 바뀌어요.';
+      else if (r.kind === 'in' && r.late === 'excused') note = '전날 늦게 퇴근해서 지각으로 세지 않아요.';
+      else if (r.kind === 'in' || r.kind === 'already') note = '새벽 늦게 퇴근하는 날엔 나갈 때 한 번 더 찍어 주세요. 다음날 지각을 감안해 드려요.';
+      else note = r.message;
+      if (seg) note += ' 잘못 잡혔으면 위에서 바꿔 주세요.';
+      holder.textContent = '';
+      holder.appendChild(el('div',
+        el('div.tap', icon(out ? 'bigmoon' : warn ? 'bigwarn' : 'bigcheck', 'bigok' + (out ? ' night' : warn ? ' warn' : '')),
+          el('div.tap-t', title),
           r.time ? el('div.tap-time', r.time) : el('div.tap-time', { style: 'font-size:34px;line-height:44px' }, r.text || ''),
-          el('div.tap-who', store('lab_member') + ' · ' + shortDay(r.day)),
-          r.result === '기록' ? (kind === 'warn' ? status('warning', '지각') : status('success', '정시 출근')) : null),
-        footnote(r.message + ' 같은 날 다시 찍어도 첫 출근 시각이 그대로 남아요.'),
-        el('div.bottom-act', el('button.hig-button.hig-button--prominent.hig-button--full.big', { onclick: function () { go('home'); } }, '홈으로'))
-      ];
-    }, { tab: false }).then(null, null);
+          el('div.tap-who', who), badge),
+        seg, footnote(note),
+        el('div.bottom-act', el('button.hig-button.hig-button--prominent.hig-button--full.big', { onclick: function () { go('home'); } }, '홈으로'))));
+    }
+    draw(r);
+    return [holder];
   }
 
   // ---------- 요약 ----------
@@ -516,13 +554,13 @@
       var out = [];
       if (a.error) out.push(el('p.empty-note', a.error));
       else {
-        var badge = a.mine ? (/^\d\d:\d\d$/.test(a.mine) ? (a.mineLate ? status('warning', '지각') : status('success', '정시 출근')) : status('neutral', a.mine))
+        var badge = a.mine ? (/^\d\d:\d\d$/.test(a.mine) ? (a.mineLate ? status('warning', '지각') : a.mineExcused ? status('info', '감안') : status('success', '정시 출근')) : status('neutral', a.mine))
           : (a.work ? status('info', '출근 전') : status('neutral', a.reason || '쉬는 날'));
         out.push(el('div.hig-card.today',
           el('div.today-top', el('span.hig-card__eyebrow', longDay(a.today)), badge),
           a.mine ? el('div.big-time' + (/^\d\d:\d\d$/.test(a.mine) ? '' : '.word'), a.mine) : el('div.big-time.word', a.work ? '아직 기록 없음' : (a.reason || '쉬는 날')),
-          el('div.today-sub', '지각 기준 ' + a.deadline + ' 이후'),
-          el('div.hint', icon('nfc', 'hig-icon hig-icon--small'), a.mine ? '출입문 태그로 기록했어요. 다시 찍어도 바뀌지 않아요.' : '출입문 태그를 휴대폰 윗부분에 대면 기록돼요.')));
+          el('div.today-sub', (a.mineOut ? '퇴근 ' + a.mineOut + ' · ' : '') + (a.mineExcused ? '전날 늦은 퇴근이라 지각 아님' : '지각 기준 ' + a.deadline + ' 이후')),
+          el('div.hint', icon('nfc', 'hig-icon hig-icon--small'), a.mine ? '새벽 늦게 퇴근할 때 다시 찍으면 퇴근으로 남아요.' : '출입문 태그를 휴대폰 윗부분에 대면 기록돼요.')));
         var st = a.stats || {};
         out.push(el('div.stats',
           el('div.stat', el('span.stat-n', String(st.present || 0), el('small', '일')), el('span.stat-l', '이번 달 출근')),

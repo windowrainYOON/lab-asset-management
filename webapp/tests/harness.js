@@ -136,7 +136,9 @@ function load(opts) {
     PropertiesService: { getScriptProperties: () => ({
       getProperty: k => (k in props ? props[k] : null), setProperty: (k, v) => { props[k] = String(v); } }) },
     CacheService: { getScriptCache: () => ({
-      get: k => (k in cache ? cache[k] : null), put: (k, v) => { cache[k] = String(v); },
+      // a value lives for its seconds on the test clock (Apps Script default: 600 s)
+      get: k => (k in cache && cache[k].until > clock.getTime() ? cache[k].v : null),
+      put: (k, v, sec) => { cache[k] = { v: String(v), until: clock.getTime() + (sec || 600) * 1000 }; },
       remove: k => { delete cache[k]; }, removeAll: ks => ks.forEach(k => delete cache[k]) }) },
     LockService: { getScriptLock: () => ({ tryLock: () => true, releaseLock: () => {} }) },
     SpreadsheetApp: {

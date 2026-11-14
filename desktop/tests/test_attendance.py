@@ -352,3 +352,47 @@ def test_attendance_settings_dialog_saves(qtbot):
     finally:
         cloud.run_blocking = orig
     assert store.saved.start == time(9, 30) and store.saved.grace == 5 and 4 not in store.saved.workdays
+
+
+# ---- clock-out by door tag and the late-leave rule ---------------------------------------
+def test_clock_out_and_late_leave(tmp_path):
+    p = tmp_path / "b.xlsx"
+    att.write_new_book(p, ["홍길동"], ["2026-10", "2026-11"])
+    wb = load_workbook(p)
+    ws = wb["2026-10"]
+    ws.cell(32, 3, "09:00–03:40")     # 10/31 (Sat): weekend, no excuse for 11/1
+    ws = wb["2026-11"]
+    # rows: 11/n at row n + 1
+    ws.cell(11, 3, "08:55–19:10")     # 11/10 Tue: evening clock-out
+    ws.cell(12, 3, "08:55–03:40")     # 11/11 Wed: left 03:40 on Thu
+    ws.cell(13, 3, "11:20")           # 11/12 Thu: late, excused
+    ws.cell(14, 3, "8:50 ~ 2:30")     # 11/13 Fri: left before 03:00 → no excuse, and Sat anyway
+    ws.cell(17, 3, "10:30")           # 11/16 Mon: late
+    ws.cell(18, 3, "09:00–04:00")     # 11/17 Tue: left 04:00 Wed
+    ws.cell(19, 3, "09:30")           # 11/18 Wed: excused
+    wb.save(p)
+    book = att.read_book(p)
+    s = book.settings
+    assert (s.late_out, s.cutoff, s.window) == (time(3, 0), time(8, 30), 60)
+    m = book.month("2026-11")
+    assert m.prev is book.month("2026-10")
+    assert m.get(date(2026, 11, 11), "홍길동") == time(8, 55)
+    assert m.get_out(date(2026, 11, 11), "홍길동") == time(3, 40)
+    assert m.get_out(date(2026, 11, 13), "홍길동") == time(2, 30)
+    assert att.late_leave(m, date(2026, 11, 11), "홍길동", s)
+    assert not att.late_leave(m, date(2026, 11, 10), "홍길동", s)
+    assert not att.late_leave(m, date(2026, 11, 13), "홍길동", s)
+    assert not att.late_leave(m, date(2026, 10, 31), "홍길동", s)
+    assert att.day_status(m, date(2026, 11, 12), "홍길동", s) == "excused"
+    assert att.day_status(m, date(2026, 11, 16), "홍길동", s) == "late"
+    assert att.day_status(m, date(2026, 11, 18), "홍길동", s) == "excused"
+    st = att.person_stats(m, "홍길동", s, {}, {}, date(2026, 11, 30))
+    assert (st.present, st.late, st.excused) == (7, 1, 2)
+    ds = att.day_summary(m, date(2026, 11, 12), s)
+    assert ds.present == ["홍길동"] and ds.late == []
+
+
+def test_settings_rows_keep_new_keys():
+    s = att.AttendanceSettings(late_out=time(2, 0), cutoff=time(8, 0), window=45)
+    again = att.parse_settings(s.rows())
+    assert (again.late_out, again.cutoff, again.window) == (time(2, 0), time(8, 0), 45)
