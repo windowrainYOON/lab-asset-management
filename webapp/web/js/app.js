@@ -548,6 +548,26 @@
     return el('li.rq-row', x.toMe && !x.acked ? el('span.udot') : null, el('span.rq-av', who),
       el('div.rq-tx', el('div.rq-memo', x.memo), el('div.rq-meta', meta)), trail);
   }
+  // Keep only items that have not ended yet (now = local time); ongoing first, then by start.
+  function upcoming(items, now) {
+    now = now || nowStamp();
+    var today = now.slice(0, 10);
+    function st(v) { return String(v || '').replace('T', ' ').slice(0, 16); }
+    return items.map(function (i) {
+      var s = st(i.start), e = st(i.end), keep, live;
+      if (i.allDay) {
+        var last = (e || s).slice(0, 10);
+        keep = last >= today; live = keep && s.slice(0, 10) <= today;
+      } else if (e) {
+        keep = e > now; live = keep && s <= now;
+      } else {
+        keep = s > now; live = false;
+      }
+      return keep ? Object.assign({}, i, { live: live }) : null;
+    }).filter(Boolean).sort(function (a, b) {
+      return (b.live - a.live) || (st(a.start) < st(b.start) ? -1 : st(a.start) > st(b.start) ? 1 : 0);
+    });
+  }
   function homeScreen() {
     load(largeTitle('요약', iconButton('person', '내 정보', function () { go('me'); })), function () { return cached('home'); }, function (r) {
       var a = r.attendance || {};
@@ -592,16 +612,16 @@
       if (!asks.length && !orders.length) out.push(err(r.asks) || err(r.requests) || el('p.empty-note.sm', '나에게 온 요청이 없어요.'));
 
       // my schedule this week
-      var sch = arr(r.schedule);
+      var sch = upcoming(arr(r.schedule));
       out.push(subHead('이번 주 내 일정', sch.length));
       out.push(err(r.schedule) || (sch.length ? list(sch.map(function (i) {
         var day = i.start.slice(0, 10);
         var time = i.allDay ? (i.end && i.end !== day ? '–' + shortDay(i.end).replace(/ \(.\)$/, '') : '종일') : hm(i.start) + '–' + hm(i.end);
         var extra = i.kind === 'reservation' ? i.purpose : i.calendar;
         return row({ icon: i.kind === 'reservation' ? 'scope' : 'cal', color: i.kind === 'reservation' ? '#0a84ff' : '#5856d6', title: i.title,
-          sub: shortDay(day) + ' ' + time + (extra ? ' · ' + extra : ''),
+          sub: shortDay(day) + ' ' + time + (extra ? ' · ' + extra : ''), trail: i.live ? el('span.pill.green', '진행 중') : null,
           onclick: function () { go(i.kind === 'reservation' ? 'res/' + day : 'schedule'); } });
-      })) : el('p.empty-note.sm', '이번 주 내 일정이 없어요.')));
+      })) : el('p.empty-note.sm', '이번 주 남은 내 일정이 없어요.')));
 
       // all notices
       var n = r.notices || {};
