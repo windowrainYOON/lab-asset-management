@@ -1,16 +1,19 @@
-"""출퇴근 기록: clock-in times kept in a Google Sheet, read (never written) by the app.
+"""출퇴근 기록: clock-in (and optional clock-out) times kept in a Google Sheet, read (never written) by the app.
 
 The sheet ("출퇴근 기록" in the lab folder) has
 
 - one tab per month named "YYYY-MM": row 1 = 날짜 | 요일 | <member> | <member> …,
-  then one row per date; a cell holds the clock-in time ("09:02") or a word such as
-  "휴가" / "출장". Records are written only by the future web app.
-- a "설정" tab: key | value rows — 출근 시간, 지각 허용(분), 근무 요일. The app and the
-  web app read the same rule; the app's settings dialog writes these cells.
+  then one row per date; a cell holds the clock-in time ("09:02"), clock-in and clock-out
+  ("09:02–19:10"; a clock-out earlier than the clock-in is the next day's dawn, "09:02–03:40"),
+  or a word such as "휴가" / "출장". Records are written only by the web app (door tag).
+- a "설정" tab: key | value rows — 출근 시간, 지각 허용(분), 근무 요일, 출근 자동 범위(분),
+  어제 퇴근 마감, 늦은 퇴근 기준. The app and the web app read the same rule; the app's
+  settings dialog writes these cells.
 
 A day counts only if it is a work day (근무 요일), not a Korean public holiday and not
 covered by a calendar event marked "출퇴근 기록에서 제외". Late = clock-in after
-출근 시간 + 지각 허용.
+출근 시간 + 지각 허용, unless the day before was a late leave: clock-out at or after
+늦은 퇴근 기준 (03:00) the next dawn, with both days 근무 요일 ("excused", 감안).
 """
 from __future__ import annotations
 
@@ -23,6 +26,8 @@ from typing import Any
 SHEET_NAME = "출퇴근 기록"
 SETTINGS_TAB = "설정"
 KEY_START, KEY_GRACE, KEY_DAYS = "출근 시간", "지각 허용(분)", "근무 요일"
+KEY_WINDOW, KEY_CUTOFF, KEY_LATE_OUT = "출근 자동 범위(분)", "어제 퇴근 마감", "늦은 퇴근 기준"
+SPAN_RE = re.compile(r"^\s*(.+?)\s*[–~\-]\s*(.+?)\s*$")
 WEEKDAYS = "월화수목금토일"  # Monday first, like date.weekday()
 MONTH_RE = re.compile(r"^(\d{4})-(\d{2})$")
 EXCLUDE_KEY = "am_attendance_exclude"   # private extended property on a calendar event
@@ -36,6 +41,9 @@ class AttendanceSettings:
     start: time = time(9, 0)
     grace: int = 10                       # minutes
     workdays: frozenset = frozenset(range(5))  # 0 = Monday
+    window: int = 60                      # minutes around 출근 시간 where a tap is the clock-in (web app)
+    cutoff: time = time(8, 30)            # a tap before this closes the day before (web app)
+    late_out: time = time(3, 0)           # leaving at/after this the next dawn excuses the next day
 
     @property
     def deadline(self) -> time:
@@ -54,14 +62,17 @@ class AttendanceSettings:
 
     def rows(self) -> list[list[Any]]:
         return [["항목", "값"], [KEY_START, self.start.strftime("%H:%M")], [KEY_GRACE, self.grace],
-                [KEY_DAYS, self.days_text()]]
+                [KEY_DAYS, self.days_text()], [KEY_WINDOW, self.window],
+                [KEY_CUTOFF, self.cutoff.strftime("%H:%M")], [KEY_LATE_OUT, self.late_out.strftime("%H:%M")]]
 
 
 @dataclass
 class Month:
     key: str                                   # "2026-11"
     people: list[str] = field(default_factory=list)
-    days: dict[date, dict[str, Any]] = field(default_factory=dict)  # value: time or text
+    days: dict[date, dict[str, Any]] = field(default_factory=dict)  # value: clock-in time or text
+    outs: dict[date, dict[str, time]] = field(default_factory=dict)  # clock-out (may be the next dawn)
+    prev: "Month | None" = None                # the month before, for the late-leave rule on day 1
 
     @property
     def year(self) -> int:
@@ -82,6 +93,17 @@ class Month:
 
     def get(self, day: date, person: str) -> Any:
         return self.days.get(day, {}).get(person)
+
+    def get_out(self, day: date, person: str) -> time | None:
+        if day.month != self.month and self.prev is not None:
+            return self.prev.get_out(day, person)
+        return self.outs.get(day, {}).get(person)
+
+    def get_any(self, day: date, person: str) -> Any:
+        """get() that also looks at the month before."""
+        if day.month != self.month and self.prev is not None:
+            return self.prev.get(day, person)
+        return self.get(day, person)
 
 
 @dataclass
@@ -114,8 +136,18 @@ def parse_time(v: Any) -> time | None:
     return None
 
 
+def parse_out(v: Any) -> time | None:
+    """The clock-out of a "09:02–19:10" cell (None when there is none)."""
+    if v is None or isinstance(v, (time, datetime, int, float)):
+        return None
+    m = SPAN_RE.match(str(v))
+    if m and re.search(r"\d\s*[:시]\s*\d", m.group(1)) and parse_time(m.group(1)) and parse_time(m.group(2)):
+        return parse_time(m.group(2))
+    return None
+
+
 def parse_cell(v: Any) -> Any:
-    """A clock-in time, a word (휴가 / 출장 …), or None."""
+    """A clock-in time, a word (휴가 / 출장 …), or None. "09:02–19:10" gives 09:02."""
     t = parse_time(v)
     if t is not None:
         return t
@@ -153,6 +185,15 @@ def parse_settings(rows: list[list[Any]]) -> AttendanceSettings:
                 s.grace = max(0, int(float(str(val).replace("분", "").strip())))
             except (TypeError, ValueError):
                 pass
+        elif key.startswith("출근 자동 범위"):
+            try:
+                s.window = max(0, int(float(str(val).replace("분", "").strip())))
+            except (TypeError, ValueError):
+                pass
+        elif key == KEY_CUTOFF:
+            s.cutoff = parse_time(val) or s.cutoff
+        elif key == KEY_LATE_OUT:
+            s.late_out = parse_time(val) or s.late_out
         elif key == KEY_DAYS and val:
             days = frozenset(WEEKDAYS.index(ch) for ch in str(val) if ch in WEEKDAYS)
             if days:
@@ -178,12 +219,18 @@ def parse_month(key: str, rows: list[list[Any]]) -> Month:
         d = parse_date(r[0])
         if d is None:
             continue
-        vals = {}
+        vals, outs = {}, {}
         for c, p in cols:
-            v = parse_cell(r[c] if c < len(r) else None)
+            raw = r[c] if c < len(r) else None
+            v = parse_cell(raw)
             if v is not None:
                 vals[p] = v
+            o = parse_out(raw) if isinstance(v, time) else None
+            if o is not None:
+                outs[p] = o
         m.days[d] = vals
+        if outs:
+            m.outs[d] = outs
     return m
 
 
@@ -200,6 +247,9 @@ def read_book(path: Path) -> Book:
             book.has_settings_tab = True
         elif MONTH_RE.match(title):
             book.months[title] = parse_month(title, rows)
+    for key, m in book.months.items():
+        first = date(m.year, m.month, 1) - timedelta(days=1)
+        m.prev = book.months.get(month_key(first))
     return book
 
 
@@ -226,13 +276,36 @@ def day_info(d: date, settings: AttendanceSettings, holidays: dict[date, str],
     return DayInfo(True)
 
 
-def status(value: Any, settings: AttendanceSettings) -> str:
-    """'late' | 'ontime' | 'text' | 'none'."""
+def _mins(t: time) -> int:
+    return t.hour * 60 + t.minute
+
+
+def late_leave(m: Month, d: date, person: str, settings: AttendanceSettings) -> bool:
+    """d's clock-out was the next dawn at/after 늦은 퇴근 기준, and d and d+1 are both 근무 요일."""
+    t_in, t_out = m.get_any(d, person), m.get_out(d, person)
+    if not isinstance(t_in, time) or t_out is None or _mins(t_out) >= _mins(t_in):
+        return False
+    if _mins(t_out) < _mins(settings.late_out):
+        return False
+    nxt = d + timedelta(days=1)
+    return d.weekday() in settings.workdays and nxt.weekday() in settings.workdays
+
+
+def status(value: Any, settings: AttendanceSettings, excused: bool = False) -> str:
+    """'late' | 'excused' (late, but the day before was a late leave) | 'ontime' | 'text' | 'none'."""
     if isinstance(value, time):
-        return "late" if settings.is_late(value) else "ontime"
+        if settings.is_late(value):
+            return "excused" if excused else "late"
+        return "ontime"
     if value:
         return "text"
     return "none"
+
+
+def day_status(m: Month, d: date, person: str, settings: AttendanceSettings) -> str:
+    v = m.get(d, person)
+    late = isinstance(v, time) and settings.is_late(v)
+    return status(v, settings, late and late_leave(m, d - timedelta(days=1), person, settings))
 
 
 @dataclass
@@ -241,6 +314,7 @@ class PersonStats:
     present: int = 0
     late: int = 0
     ontime: int = 0
+    excused: int = 0                       # late, but after a late leave (counted as ontime)
     avg_in: time | None = None
     late_days: list[tuple[date, time]] = field(default_factory=list)
 
@@ -254,8 +328,8 @@ def person_stats(m: Month, person: str, settings: AttendanceSettings, holidays: 
             continue
         st.workdays += 1
         v = m.get(d, person)
-        s = status(v, settings)
-        if s in ("late", "ontime"):
+        s = day_status(m, d, person, settings)
+        if s in ("late", "ontime", "excused"):
             st.present += 1
             mins.append(v.hour * 60 + v.minute)
             if s == "late":
@@ -263,6 +337,8 @@ def person_stats(m: Month, person: str, settings: AttendanceSettings, holidays: 
                 st.late_days.append((d, v))
             else:
                 st.ontime += 1
+                if s == "excused":
+                    st.excused += 1
     if mins:
         avg = round(sum(mins) / len(mins))
         st.avg_in = time(avg // 60, avg % 60)
@@ -280,9 +356,8 @@ class DaySummary:
 def day_summary(m: Month, d: date, settings: AttendanceSettings) -> DaySummary:
     out = DaySummary()
     for p in m.people:
-        v = m.get(d, p)
-        s = status(v, settings)
-        if s in ("late", "ontime"):
+        s = day_status(m, d, p, settings)
+        if s in ("late", "ontime", "excused"):
             out.present.append(p)
             if s == "late":
                 out.late.append(p)

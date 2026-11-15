@@ -14,6 +14,7 @@ function actions_() {
   'home': { fn: home_ },
   'batch': { fn: batch_ },
   'tap': { fn: tap_ },
+  'tap.switch': { fn: tapSwitch_ },
   'attendance.month': { fn: attendanceMonth_ },
   'schedule.range': { fn: scheduleRange_ },
   'equipment.list': { fn: function () { return equipmentList_(); } },
