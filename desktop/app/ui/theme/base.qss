@@ -364,3 +364,7 @@ QAbstractSpinBox[compact="true"]:focus { padding-right: {{sub:field-pad:2}}; }
 /* Delete inside a glass capsule keeps its red round fill (hig-delete), white glyph */
 #glassCapsule #destructive { background: {{fill:red}}; }
 #glassCapsule #destructive:hover { background: {{mix:red:label:0.14}}; }
+
+/* ---- 일정: 일정표 이미지를 끌어 올 때 (drop target over the calendar) ---------------------- */
+#dropTarget { border: 2px dashed {{c:accent}}; border-radius: {{r:region-box-radius}};
+              background: {{mix:region-canvas:accent:0.08}}; color: {{t:accent}}; font-weight: 600; }

@@ -29,6 +29,17 @@ EVENT_BAR = 3                 # leading color bar of a timed event (Calendar.app
 
 
 # ---- dates ------------------------------------------------------------------------
+
+def event_label(ev) -> str:
+    """The text on an event block: its title, plus the 담당자 for events taken from a
+    schedule picture (many are titled just "발표", the name tells them apart)."""
+    t = getattr(ev, "title", "") or "새 일정"
+    extra = getattr(ev, "extra", None) or {}
+    who = getattr(ev, "assignee_name", "")
+    if extra.get("am_import") and who and who not in t:
+        t = f"{t} {who}"
+    return t
+
 def week_start(d: date) -> date:
     return d - timedelta(days=(d.weekday() + 1) % 7)
 
@@ -197,7 +208,7 @@ def _pill(p: QPainter, rect: QRectF, ev: Event, current: bool, font: QFont, hove
     r = rect.height() / 2
     p.drawRoundedRect(rect, r, r)
     pad = tokens.space("space-2")
-    _draw_text(p, rect.adjusted(pad, 0, -pad, 0), ev.title or "새 일정", font, fg)
+    _draw_text(p, rect.adjusted(pad, 0, -pad, 0), event_label(ev), font, fg)
 
 
 # ---- day header (주) ------------------------------------------------------------------
@@ -612,9 +623,9 @@ class TimeGrid(_Painted):
             tx = r.adjusted(EVENT_BAR + pad + 1, pad / 2, -pad, 0)
             if r.height() < 2 * line + pad:  # one line: title and time side by side
                 _draw_text(p, QRectF(tx.left(), r.top(), tx.width(), min(r.height(), line + pad)),
-                           ev.title or "새 일정", title_f, fg)
+                           event_label(ev), title_f, fg)
             else:
-                _draw_text(p, QRectF(tx.left(), tx.top(), tx.width(), line), ev.title or "새 일정", title_f, fg)
+                _draw_text(p, QRectF(tx.left(), tx.top(), tx.width(), line), event_label(ev), title_f, fg)
                 y = tx.top() + line
                 _draw_text(p, QRectF(tx.left(), y, tx.width(), line), range_label(ev), sub_f, sub)
                 if ev.location and r.height() >= 3 * line + pad:
@@ -860,7 +871,7 @@ class MonthGrid(_Painted):
                     tl = time_label(s) if s.date() == d else ""
                     tw = QFontMetrics(time_f).horizontalAdvance(tl) + pad / 2 if tl else 0
                     _draw_text(p, QRectF(r.left() + pad / 2 + dot + pad / 2, r.top(), r.width() - dot - pad - tw, r.height()),
-                               ev.title or "새 일정", ev_f, fg)
+                               event_label(ev), ev_f, fg)
                     if tl:
                         _draw_text(p, QRectF(r.right() - tw, r.top(), tw - pad / 4, r.height()), tl, time_f,
                                    fg if cur else tokens.text("label-secondary", "region-box" if inside else "region-canvas"),

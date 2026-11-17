@@ -472,8 +472,11 @@ class SchedulePage(QWidget):
         self.list_btn.clicked.connect(self.toggle_list)
         self.add_btn = icons.set_icon(QPushButton(), "plus", "새 일정 (⌘N)")
         self.add_btn.clicked.connect(lambda: self.new_event())
+        self.image_btn = icons.set_icon(QPushButton(), "photo.on.rectangle",
+                                        "일정표 이미지에서 가져오기… (⇧⌘I) · 달력에 끌어다 놓거나 ⌘V로 붙여넣어도 됩니다")
+        self.image_btn.clicked.connect(self.import_image_file)
         bar.addWidget(glass_capsule(self.list_btn))
-        bar.addWidget(glass_capsule(self.add_btn))
+        bar.addWidget(glass_capsule(self.add_btn, self.image_btn))
         bar.addStretch(1)
         self.seg = Segmented(VIEWS)
         self.seg.changed.connect(self.set_view)
@@ -550,6 +553,12 @@ class SchedulePage(QWidget):
         self.month_view.day_clicked.connect(self._month_day)
         self.year_view.month_opened.connect(lambda d: (self.go_date(d), self.set_view("month")))
         body.addWidget(self.stack, 1)
+        self.drop_note = QLabel("여기에 놓으면 일정표를 읽습니다\nPNG · JPG · HEIC 이미지", self.stack)
+        self.drop_note.setObjectName("dropTarget")
+        self.drop_note.setAlignment(Qt.AlignCenter)
+        self.drop_note.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self.drop_note.hide()
+        self.setAcceptDrops(True)
 
         # right: inspector (mini month above it in the day view, like Calendar)
         # in the window's inspector box (RegionLayout boxes), which pads and paints it
@@ -579,6 +588,8 @@ class SchedulePage(QWidget):
         QShortcut(QKeySequence("Ctrl+Alt+S"), self, activated=self.toggle_list, context=ctx)
         QShortcut(QKeySequence("Ctrl+Alt+R"), self, activated=lambda: self.load(force=True), context=ctx)
         QShortcut(QKeySequence("Ctrl+Alt+,"), self, activated=self.edit_settings, context=ctx)
+        # ⌘V with a picture on the clipboard: only over the calendar views (text fields keep ⌘V)
+        QShortcut(QKeySequence.Paste, self.stack, activated=self.paste_image, context=ctx)
         self.seg.set_current(self.view)
         self.side.setVisible(data.get("schedule_list", True))
         self._apply_view()
@@ -956,6 +967,199 @@ class SchedulePage(QWidget):
             return
         if dlg.exec():
             self.cal_list.set_calendars(self.calendars(), self._hidden())
+            self.load(force=True)
+
+    # ---- 일정표 이미지 가져오기 (schedule-table picture → events) ------------------------------
+    IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".heic", ".heif", ".gif", ".bmp", ".webp", ".tif", ".tiff")
+
+    def _image_url(self, mime) -> str:
+        for u in mime.urls() if mime.hasUrls() else []:
+            if u.isLocalFile() and u.toLocalFile().lower().endswith(self.IMAGE_SUFFIXES):
+                return u.toLocalFile()
+        return ""
+
+    def dragEnterEvent(self, e) -> None:
+        mime = e.mimeData()
+        if self._image_url(mime) or mime.hasImage():
+            e.acceptProposedAction()
+            self.drop_note.setGeometry(self.stack.rect().adjusted(4, 4, -4, -4))
+            self.drop_note.raise_()
+            self.drop_note.show()
+        else:
+            super().dragEnterEvent(e)
+
+    def dragLeaveEvent(self, e) -> None:
+        self.drop_note.hide()
+        super().dragLeaveEvent(e)
+
+    def dropEvent(self, e) -> None:
+        self.drop_note.hide()
+        mime = e.mimeData()
+        path = self._image_url(mime)
+        if path:
+            e.acceptProposedAction()
+            self.import_image(path)
+        elif mime.hasImage():
+            e.acceptProposedAction()
+            self.import_image(self._qimage_bytes(mime.imageData()), "끌어 놓은 이미지")
+
+    @staticmethod
+    def _qimage_bytes(img) -> bytes:
+        from PySide6.QtCore import QBuffer, QByteArray, QIODevice
+        from PySide6.QtGui import QImage
+        q = img if isinstance(img, QImage) else QImage(img)
+        data = QByteArray()
+        buf = QBuffer(data)
+        buf.open(QIODevice.WriteOnly)
+        q.save(buf, "PNG")
+        return bytes(data)
+
+    def import_image_file(self) -> None:
+        from PySide6.QtWidgets import QFileDialog
+        path, _ = QFileDialog.getOpenFileName(self, "일정표 이미지 고르기", "",
+                                              "이미지 (" + " ".join("*" + s for s in self.IMAGE_SUFFIXES) + ")")
+        if path:
+            self.import_image(path)
+
+    def paste_image(self) -> None:
+        from PySide6.QtWidgets import QApplication
+        mime = QApplication.clipboard().mimeData()
+        path = self._image_url(mime)
+        if path:
+            self.import_image(path)
+        elif mime.hasImage():
+            self.import_image(self._qimage_bytes(mime.imageData()), "붙여넣은 이미지")
+
+    def _events_between(self, first: date, last: date) -> list[Event]:
+        start = datetime.combine(first, time()).astimezone()
+        end = datetime.combine(last + timedelta(days=1), time()).astimezone()
+        events, _errors = gcalendar.list_all(self.calendars(), start, end)
+        return events
+
+    def import_image(self, src, name: str = "") -> None:
+        """Read a monthly schedule picture, let the user check the rows, then add them."""
+        import time as _time
+        from pathlib import Path
+        from ..core import ocr_engine
+        from ..core import schedule_image as si
+        from .cloud import run_blocking
+        from .schedule_import import ScheduleImportDialog
+
+        if not self._ready():
+            return
+        if not ocr_engine.available():
+            QMessageBox.warning(self, "일정표 가져오기", "글자 인식(OCR) 엔진을 불러오지 못해 이미지를 읽을 수 없습니다.\n"
+                                f"{ocr_engine.last_error or 'easyocr가 설치되어 있지 않습니다.'}")
+            return
+        if not any(c.get("writable", True) for c in self.calendars()):
+            QMessageBox.warning(self, "일정표 가져오기", "지금 고른 캘린더는 모두 보기만 할 수 있어 일정을 넣을 곳이 없습니다.\n"
+                                "⚙ ‘캘린더 설정…’에서 일정을 고칠 수 있는 캘린더(내 캘린더, 편집 권한으로 공유받은 캘린더)를 "
+                                "추가해 주세요.")
+            return
+        try:
+            img = ocr_engine.load_image(src)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self, "일정표 가져오기", f"이미지를 열지 못했습니다.\n{exc}")
+            return
+        name = name or (Path(src).name if isinstance(src, str) else "")
+        t0 = _time.monotonic()
+
+        def read():
+            boxes = ocr_engine.read(img)
+            si.mark_blue(img, boxes)
+            return boxes
+        try:
+            boxes = run_blocking(self, read, "일정표를 읽는 중… (처음 한 번은 글자 인식 모델을 불러오느라 조금 더 걸립니다)")
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self, "일정표 가져오기", f"이미지를 읽지 못했습니다.\n{exc}")
+            return
+        seconds = _time.monotonic() - t0
+        members = self.project.members() if self.project else []
+        opts = si.options(self.project)
+        grid = si.find_grid(img, boxes)
+        if grid is None:
+            QMessageBox.warning(self, "일정표 가져오기", "달력 칸을 찾지 못했습니다. 요일 머리줄과 날짜 칸이 다 보이게 "
+                                "찍거나 캡처한 월간 일정표를 넣어 주세요.")
+            return
+        cache: dict = {}
+
+        def existing(y: int, m: int) -> list[Event]:
+            if (y, m) not in cache:
+                first = date(y, m, 1) - timedelta(days=7)
+                last = (date(y, m, 28) + timedelta(days=4)).replace(day=1) + timedelta(days=7)
+                try:
+                    cache[(y, m)] = run_blocking(self, lambda: self._events_between(first, last), "캘린더와 겹치는지 보는 중…")
+                except Exception:  # noqa: BLE001  (still importable; duplicates are just not marked)
+                    cache[(y, m)] = []
+            return cache[(y, m)]
+
+        def titles(evs: list[Event], person_title: str) -> list[str]:
+            return [e.title for e in evs if e.title and e.title != person_title]
+
+        y, m = si.guess_month(grid, boxes)
+        evs = existing(y, m)
+        cands, info = si.build(img, boxes, members, opts, y, m, evs, titles(evs, opts["person_title"]))
+        cid = gcalendar.default_calendar(self.project.setting("calendar") if self.project else None)
+        dlg = ScheduleImportDialog(self, img, cands, info, members, self.calendars(), cid, opts, name, seconds)
+
+        def rebuild():
+            yy, mm = dlg.chosen_month()
+            o = dlg.current_opts()
+            ev2 = existing(yy, mm)
+            c2, _ = si.build(img, boxes, members, o, yy, mm, ev2, titles(ev2, o["person_title"]))
+            dlg.set_candidates(c2)
+        dlg.rebuild.connect(rebuild)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        rows = dlg.result_candidates()
+        cal = dlg.calendar_id()
+        self.add_imported(rows, cal, name)
+        if self.project is not None:
+            self.project.set_setting(si.SETTING_KEY, si.learn(dlg.current_opts(), rows))
+
+    def add_imported(self, rows, calendar_id: str, name: str = "") -> None:
+        import uuid
+        from .cloud import run_blocking
+        batch = uuid.uuid4().hex[:12]
+        stamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+        note = f"일정표 이미지에서 가져옴 ({stamp}" + (f", {name})" if name else ")")
+        c = next((c for c in self.calendars() if c["id"] == calendar_id), {"name": ""})
+
+        def save():
+            done = []
+            for r in rows:
+                ev = Event(title=r.title, location=r.location, description=note, assignee=r.assignee,
+                           assignee_name=r.assignee_name, calendar_id=calendar_id)
+                if r.start is None:
+                    ev.all_day, ev.start, ev.end = True, r.day, r.day
+                else:
+                    ev.start, ev.end = r.start_dt().astimezone(), r.end_dt().astimezone()
+                ev.extra = {"am_import": batch}
+                done.append(gcalendar.save_event(calendar_id, ev).id)
+            return done
+        try:
+            ids = run_blocking(self, save, f"일정 {len(rows)}개를 추가하는 중…")
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self, "일정표 가져오기", f"일정을 다 추가하지 못했습니다.\n{exc}\n"
+                                "이미 들어간 일정은 캘린더에 남아 있습니다.")
+            self.load(force=True)
+            return
+        if rows:
+            self.go_date(min(r.day for r in rows))
+            self.set_view("month")
+        self.load(force=True)
+        box = QMessageBox(self)
+        box.setWindowTitle("일정표 가져오기")
+        box.setText(f"일정 {len(ids)}개를 {c.get('name') or '캘린더'}에 추가했습니다.")
+        undo = box.addButton("실행 취소", QMessageBox.DestructiveRole)
+        box.addButton("확인", QMessageBox.AcceptRole)
+        box.exec()
+        if box.clickedButton() is undo:
+            try:
+                run_blocking(self, lambda: [gcalendar.delete_event(calendar_id, i) for i in ids],
+                             "추가한 일정을 지우는 중…")
+            except Exception as exc:  # noqa: BLE001
+                QMessageBox.warning(self, "일정표 가져오기", f"다 지우지 못했습니다.\n{exc}")
             self.load(force=True)
 
     def theme_changed(self) -> None:

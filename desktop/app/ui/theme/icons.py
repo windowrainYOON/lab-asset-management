@@ -78,6 +78,11 @@ CUSTOM = {
         "hig": False, "rtl": "keep",
         "svg": '<path d="M4.5 6 8 18l4-11 4 11 3.5-12"/><path d="M3.5 10.5h17M3.5 13.5h17"/>',
     },
+    "photo.on.rectangle": {  # import a picture (SF Symbols name)
+        "hig": False, "rtl": "keep",
+        "svg": '<rect x="6.5" y="4" width="14" height="11" rx="2"/><path d="M3.5 8v9.5A2.5 2.5 0 0 0 6 20h10.5"/>'
+               '<path d="m9 13 3.2-3.2a1 1 0 0 1 1.4 0L17 13.2"/><circle cx="16.5" cy="7.5" r="1"/>',
+    },
     "cart.badge.plus": {  # add to cart (SF Symbols name)
         "hig": False, "rtl": "flip",
         "svg": '<path d="M2.5 4h2.6l2.2 10.2a1.5 1.5 0 0 0 1.5 1.2h8.4a1.5 1.5 0 0 0 1.5-1.1L20.5 8H6"/>'

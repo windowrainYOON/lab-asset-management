@@ -304,6 +304,8 @@ class MainWindow(QMainWindow):
         self._action(file_menu, "샘플 프로젝트 열기", self.open_sample)
         file_menu.addSeparator()
         self._action(file_menu, "파일 가져오기 (CSV / Excel)…", self.import_file, QKeySequence("Ctrl+I"))
+        self._action(file_menu, "일정표 이미지 가져오기…",
+                     lambda: (self.show_schedule(), self.schedule_page.import_image_file()), QKeySequence("Ctrl+Shift+I"))
         drive_menu = bar.addMenu("Google Drive")
         self._action(drive_menu, "위치 세트 열기…", self.choose_location_set, QKeySequence("Ctrl+Shift+O"))
         self.locations_action = self._action(drive_menu, "데이터 위치…", self.edit_locations)

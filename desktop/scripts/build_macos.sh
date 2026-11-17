@@ -57,6 +57,14 @@ else
   echo "No Google OAuth client found: users will need to choose a client JSON in the app."
 fi
 
+# Offline OCR (일정표 이미지 가져오기): bundle EasyOCR's Korean + English models so the app
+# reads schedule pictures with no network or account. Downloaded once into a cache.
+OCR_CACHE="${OCR_MODEL_CACHE:-$HOME/.EasyOCR/model}"
+mkdir -p "$OCR_CACHE" build/ocr_models
+"$VPY" -c "import easyocr; easyocr.Reader(['ko', 'en'], gpu=False, verbose=False, model_storage_directory='$OCR_CACHE')"
+cp "$OCR_CACHE"/*.pth build/ocr_models/
+ADD_DATA+=(--add-data "build/ocr_models:ocr_models")
+
 # Where the built app keeps its state: the project's state/ folder when there is one.
 if [ -n "$STATE_DIR" ]; then
   mkdir -p build && printf '%s\n' "$STATE_DIR" > build/state_dir.txt
@@ -71,6 +79,7 @@ rm -rf dist
   --osx-bundle-identifier com.windowrain.assetmanager \
   --collect-submodules app \
   --collect-data googleapiclient \
+  --collect-all easyocr \
   --hidden-import googleapiclient.discovery \
   --hidden-import google_auth_oauthlib.flow \
   --exclude-module tkinter \

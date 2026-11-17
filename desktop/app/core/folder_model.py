@@ -38,7 +38,7 @@ from .work import WORK_NAME  # noqa: E402
 FEATURE_FILES = {"장비 예약.xlsx": "reservations", "주문 요청.xlsx": "order_requests",
                  "예산 입출 내역.xlsx": "budget"}
 PERSONAL_FOLDER = "Personal Asset"
-SHARED_SETTINGS = ("calendar", "webapp")  # generic settings kept in the folder's settings file (webapp: mobile web app password)
+SHARED_SETTINGS = ("calendar", "webapp", "schedule_import")  # generic settings kept in the folder's settings file (webapp: mobile web app password; schedule_import: names learned from schedule pictures)
 DEFAULT_STOP_MARKERS = ["최근 주문내역"]
 
 

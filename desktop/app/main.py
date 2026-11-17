@@ -22,6 +22,10 @@ def main(argv: list[str] | None = None) -> int:
     if "--reminders" in argv:  # event alert mails, every few minutes from launchd
         from app.core.services.reminders import run as run_reminders
         return run_reminders()
+    if "--ocr-check" in argv:  # check the bundled OCR engine of a build (일정표 이미지 가져오기)
+        from app.core.ocr_engine import self_check
+        rest = argv[argv.index("--ocr-check") + 1:]
+        return self_check(rest[0] if rest else "")
     if "--briefing" in argv:  # scheduled run from launchd: no window
         from app.core.services.briefing_run import run
         return run(force="--force" in argv)
